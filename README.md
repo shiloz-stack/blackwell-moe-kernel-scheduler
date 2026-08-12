@@ -2,7 +2,7 @@
 
 A kernel-level exploration of **persistent expert-tile scheduling** and **workload-aware dispatch** for irregular Mixture-of-Experts (MoE) inference on NVIDIA Blackwell GPUs.
 
-> **Status:** Work in progress. This repository currently describes the design and evaluation plan. Performance results will be published only after correctness validation and reproducible benchmarking on Blackwell hardware.
+> **Status:** Work in progress. Phase 2 includes a pinned CUTLASS BF16 grouped-GEMM baseline and GPU correctness/benchmark harness. Performance results will be published only after validation on Blackwell hardware.
 
 ## Motivation
 
@@ -194,7 +194,10 @@ python3 python/generate_workloads.py \
   --output workload.json
 ```
 
-CUDA is disabled by default in Phase 1. The current CUDA entry point returns `kNotImplemented` intentionally; it will be replaced by the pinned CUTLASS grouped-GEMM baseline in Phase 2.
+CUDA remains disabled by default so the workload tools build without a CUDA
+toolkit. Enable `BLACKWELL_MOE_ENABLE_CUDA` to fetch pinned CUTLASS `v4.6.0`,
+build the BF16 grouped-GEMM baseline, GPU correctness test, and CUDA Event
+benchmark. See [`docs/phase2_testing.md`](docs/phase2_testing.md).
 
 ## Current Implementation
 
@@ -204,6 +207,8 @@ CUDA is disabled by default in Phase 1. The current CUDA entry point returns `kN
 - [x] Expert-tile decomposition
 - [x] Host reference expert-order and static-persistent assignment
 - [x] Benchmark metadata CLI and unit tests
-- [ ] CUTLASS grouped-GEMM baseline
+- [x] Pinned CUTLASS v4.6.0 BF16 grouped-GEMM baseline
+- [x] Reusable grouped-GEMM plan with untimed metadata initialization
+- [x] GPU correctness test against an FP32-accumulating CPU reference
+- [x] CUDA Event benchmark with median/p95 latency and environment metadata
 - [ ] Device-side persistent schedulers
-

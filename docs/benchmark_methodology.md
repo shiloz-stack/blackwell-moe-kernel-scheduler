@@ -15,3 +15,10 @@ Every published result must include the GPU model, CUDA toolkit, driver, CUTLASS
 
 Phase 1 reports workload metadata only. Its CLI output must not be presented as GPU throughput or latency.
 
+## Phase 2 baseline boundary
+
+`moe_gpu_bench` measures one reusable CUTLASS grouped-GEMM plan with CUDA
+Events. Memory allocation, routing generation, active-expert filtering,
+metadata copies, and CUTLASS initialization occur before timing. Report this as
+kernel-only latency. End-to-end dispatch measurements will be added when host
+or device preprocessing policies are compared.
