@@ -1,0 +1,14 @@
+build/
+cmake-build-*/
+.cache/
+.DS_Store
+__pycache__/
+*.py[cod]
+*.o
+*.a
+*.so
+*.dylib
+*.csv
+results/*
+!results/.gitkeep
+
