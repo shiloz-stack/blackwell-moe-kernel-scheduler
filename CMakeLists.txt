@@ -20,3 +20,17 @@ target_compile_options(blackwell_moe_core PRIVATE
 
 add_executable(moe_workload_bench benchmarks/benchmark_main.cpp)
 target_link_libraries(moe_workload_bench PRIVATE blackwell_moe_core)
+
+option(BLACKWELL_MOE_BUILD_TESTS "Build unit tests" ON)
+
+if(BLACKWELL_MOE_BUILD_TESTS)
+  enable_testing()
+
+  add_executable(test_workload tests/test_workload.cpp)
+  target_link_libraries(test_workload PRIVATE blackwell_moe_core)
+  add_test(NAME workload COMMAND test_workload)
+
+  add_executable(test_scheduler tests/test_scheduler.cpp)
+  target_link_libraries(test_scheduler PRIVATE blackwell_moe_core)
+  add_test(NAME scheduler COMMAND test_scheduler)
+endif()
