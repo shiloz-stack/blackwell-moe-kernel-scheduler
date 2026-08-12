@@ -162,3 +162,48 @@ Implementation references and exact upstream revisions will be added as dependen
 ## License
 
 A license will be selected before the first public release.
+
+
+## Getting Started
+
+Phase 1 is dependency-free on the CPU side and requires a C++17 compiler and CMake 3.24 or newer:
+
+```bash
+cmake -S . -B build -DBLACKWELL_MOE_BUILD_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+Inspect a workload and its expert-tile imbalance:
+
+```bash
+./build/moe_workload_bench \
+  --distribution=zipf \
+  --scheduler=static_persistent \
+  --experts=64 \
+  --tokens=4096
+```
+
+Generate a routing workload without third-party Python packages:
+
+```bash
+python3 python/generate_workloads.py \
+  --distribution heavy_hitter \
+  --experts 64 \
+  --tokens 4096 \
+  --output workload.json
+```
+
+CUDA is disabled by default in Phase 1. The current CUDA entry point returns `kNotImplemented` intentionally; it will be replaced by the pinned CUTLASS grouped-GEMM baseline in Phase 2.
+
+## Current Implementation
+
+- [x] CMake project and optional CUDA boundary
+- [x] Deterministic uniform, heavy-hitter, sparse, and Zipf workload generation
+- [x] Routing and expert-tile imbalance metrics
+- [x] Expert-tile decomposition
+- [x] Host reference expert-order and static-persistent assignment
+- [x] Benchmark metadata CLI and unit tests
+- [ ] CUTLASS grouped-GEMM baseline
+- [ ] Device-side persistent schedulers
+
