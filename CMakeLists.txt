@@ -39,6 +39,14 @@ if(BLACKWELL_MOE_ENABLE_CUDA)
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+
+  add_executable(moe_gpu_bench benchmarks/gpu_benchmark.cu)
+  target_link_libraries(moe_gpu_bench PRIVATE
+    blackwell_moe_cuda blackwell_moe_cutlass_headers CUDA::cudart)
+  set_target_properties(moe_gpu_bench PROPERTIES
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
 endif()
 
 if(BLACKWELL_MOE_BUILD_TESTS)
