@@ -51,4 +51,15 @@ if(BLACKWELL_MOE_BUILD_TESTS)
   add_executable(test_scheduler tests/test_scheduler.cpp)
   target_link_libraries(test_scheduler PRIVATE blackwell_moe_core)
   add_test(NAME scheduler COMMAND test_scheduler)
+
+  if(BLACKWELL_MOE_ENABLE_CUDA)
+    add_executable(test_cutlass_correctness tests/test_cutlass_correctness.cu)
+    target_link_libraries(test_cutlass_correctness PRIVATE
+      blackwell_moe_cuda blackwell_moe_cutlass_headers CUDA::cudart)
+    set_target_properties(test_cutlass_correctness PROPERTIES
+      CUDA_STANDARD 17
+      CUDA_STANDARD_REQUIRED ON
+      CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+    add_test(NAME cutlass_correctness COMMAND test_cutlass_correctness)
+  endif()
 endif()
