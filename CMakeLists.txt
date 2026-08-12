@@ -26,10 +26,15 @@ target_link_libraries(moe_workload_bench PRIVATE blackwell_moe_core)
 
 if(BLACKWELL_MOE_ENABLE_CUDA)
   enable_language(CUDA)
+  find_package(CUDAToolkit 12.8 REQUIRED)
   include(cmake/CudaArch.cmake)
+  include(cmake/Dependencies.cmake)
+
   add_library(blackwell_moe_cuda src/kernels/cutlass_baseline.cu)
   target_include_directories(blackwell_moe_cuda PUBLIC include)
-  target_link_libraries(blackwell_moe_cuda PUBLIC blackwell_moe_core)
+  target_link_libraries(blackwell_moe_cuda
+    PUBLIC blackwell_moe_core
+    PRIVATE blackwell_moe_cutlass_headers CUDA::cudart)
   set_target_properties(blackwell_moe_cuda PROPERTIES
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
@@ -47,4 +52,3 @@ if(BLACKWELL_MOE_BUILD_TESTS)
   target_link_libraries(test_scheduler PRIVATE blackwell_moe_core)
   add_test(NAME scheduler COMMAND test_scheduler)
 endif()
-
