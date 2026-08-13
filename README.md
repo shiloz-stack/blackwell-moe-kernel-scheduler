@@ -2,7 +2,7 @@
 
 A kernel-level exploration of **persistent expert-tile scheduling** and **workload-aware dispatch** for irregular Mixture-of-Experts (MoE) inference on NVIDIA Blackwell GPUs.
 
-> **Status:** Work in progress. The CUTLASS BF16 grouped baseline is validated on NVIDIA B200. An independent SM100a-native dense TMA/tcgen05/TMEM path is now implemented and awaiting its B200 correctness/performance gate.
+> **Status:** Work in progress. The CUTLASS BF16 grouped baseline is validated on NVIDIA B200. Direct CuTe, 1-SM/2-SM native collectives, and project-owned GPU scheduler probes compile for SM100a in CI and await their B200 correctness/performance gate.
 
 ## Motivation
 
@@ -140,9 +140,9 @@ All benchmark reports will record GPU model, clocks or power mode when relevant,
 - [x] Implement expert-tile decomposition and CPU scheduler simulation
 - [ ] Validate the SM100a one-SM TMA/tcgen05/TMEM dense kernel on B200
 - [ ] Validate the direct CuTe TMA/tcgen05/TMEM kernel on B200
-- [ ] Implement static persistent scheduling
-- [ ] Implement dynamic work distribution
-- [ ] Add active-expert compaction
+- [x] Implement and test static persistent GPU tile assignment
+- [x] Implement and test dynamic GPU work distribution with chunked claims
+- [x] Add active-expert compaction to the generated device work list
 - [ ] Evaluate CLC-assisted work redistribution
 - [ ] Profile scheduler overhead and CTA tail effects
 - [ ] Derive and validate the crossover dispatch model
@@ -230,4 +230,11 @@ See [`docs/sm100_native_dense.md`](docs/sm100_native_dense.md).
 - [x] Native dense correctness test and small-`M` CUDA Event benchmark
 - [x] Direct CuTe TMA barriers, TMEM allocation, tcgen05 MMA, and TMEM-load epilogue
 - [x] Direct CuTe CPU-reference correctness test and benchmark harness
-- [ ] Project-owned device-side expert-tile persistent schedulers
+- [x] Two-SM TMA-multicast/tcgen05 collective reference and benchmark
+- [x] Project-owned device-side expert-tile persistent schedulers
+- [x] Exact-once GPU scheduler correctness and observed CTA-load metrics
+
+Run the complete native-kernel and scheduler matrix with
+[`tools/run_b200_optimization_suite.sh`](tools/run_b200_optimization_suite.sh).
+The output boundary and interpretation are documented in
+[`docs/b200_optimization_suite.md`](docs/b200_optimization_suite.md).

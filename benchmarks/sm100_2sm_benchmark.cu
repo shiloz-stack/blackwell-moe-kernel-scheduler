@@ -182,15 +182,18 @@ int main(int argc, char** argv) {
         (median_ms * 1.0e9);
     const auto stats = plan.stats();
     if (options.csv) {
-      std::cout << "kernel,device,cuda_runtime,cutlass,m,n,k,median_ms,p95_ms,"
-                   "tflops,tile_m,tile_n,tile_k,persistent_ctas,workspace_bytes\n"
+      std::cout << "kernel,device,compute_capability,cuda_runtime,cutlass,m,n,k,"
+                   "warmup,iterations,median_ms,p95_ms,tflops,tile_m,tile_n,"
+                   "tile_k,sm_count,persistent_ctas,workspace_bytes\n"
                 << sm100_2sm_kernel_name() << ',' << properties.name << ','
+                << properties.major << '.' << properties.minor << ','
                 << runtime_version << ',' << BLACKWELL_MOE_CUTLASS_REVISION
                 << ',' << options.m << ',' << options.n << ',' << options.k
-                << ',' << median_ms << ',' << p95_ms << ',' << tflops << ','
+                << ',' << options.warmup << ',' << options.iterations << ','
+                << median_ms << ',' << p95_ms << ',' << tflops << ','
                 << stats.tile_m << ',' << stats.tile_n << ',' << stats.tile_k
-                << ',' << stats.persistent_ctas << ',' << stats.workspace_bytes
-                << '\n';
+                << ',' << stats.sm_count << ',' << stats.persistent_ctas << ','
+                << stats.workspace_bytes << '\n';
     } else {
       std::cout << "kernel=" << sm100_2sm_kernel_name()
                 << " shape=" << options.m << 'x' << options.n << 'x'
