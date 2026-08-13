@@ -2,7 +2,7 @@
 
 A kernel-level exploration of **persistent expert-tile scheduling** and **workload-aware dispatch** for irregular Mixture-of-Experts (MoE) inference on NVIDIA Blackwell GPUs.
 
-> **Status:** Work in progress. Phase 2 includes a pinned CUTLASS BF16 grouped-GEMM baseline and GPU correctness/benchmark harness. Performance results will be published only after validation on Blackwell hardware.
+> **Status:** Work in progress. The CUTLASS BF16 grouped baseline is validated on NVIDIA B200. An independent SM100a-native dense TMA/tcgen05/TMEM path is now implemented and awaiting its B200 correctness/performance gate.
 
 ## Motivation
 
@@ -134,13 +134,16 @@ All benchmark reports will record GPU model, clocks or power mode when relevant,
 
 ## Roadmap
 
-- [ ] Establish a correct CUTLASS grouped-GEMM baseline
-- [ ] Build the routing-aware workload generator
-- [ ] Record expert-level and tile-level imbalance metrics
-- [ ] Implement expert-tile decomposition
+- [x] Establish and validate a CUTLASS grouped-GEMM baseline on B200
+- [x] Build the routing-aware workload generator
+- [x] Record expert-level and tile-level imbalance metrics
+- [x] Implement expert-tile decomposition and CPU scheduler simulation
+- [ ] Validate the SM100a one-SM TMA/tcgen05/TMEM dense kernel on B200
+- [ ] Implement the native dataflow directly with CuTe
 - [ ] Implement static persistent scheduling
 - [ ] Implement dynamic work distribution
 - [ ] Add active-expert compaction
+- [ ] Evaluate CLC-assisted work redistribution
 - [ ] Profile scheduler overhead and CTA tail effects
 - [ ] Derive and validate the crossover dispatch model
 - [ ] Publish reproducible Blackwell benchmark results
@@ -204,6 +207,11 @@ toolkit. Enable `BLACKWELL_MOE_ENABLE_CUDA` to fetch pinned CUTLASS `v4.6.0`,
 build the BF16 grouped-GEMM baseline, GPU correctness test, and CUDA Event
 benchmark. See [`docs/phase2_testing.md`](docs/phase2_testing.md).
 
+On B100/B200/GB200, additionally enable
+`BLACKWELL_MOE_ENABLE_SM100_NATIVE` to build the one-SM native TMA/tcgen05/TMEM
+dense kernel, its CPU-reference correctness test, and its small-`M` benchmark.
+See [`docs/sm100_native_dense.md`](docs/sm100_native_dense.md).
+
 ## Current Implementation
 
 - [x] CMake project and optional CUDA boundary
@@ -217,4 +225,7 @@ benchmark. See [`docs/phase2_testing.md`](docs/phase2_testing.md).
 - [x] Reusable grouped-GEMM plan with untimed metadata initialization
 - [x] GPU correctness test against an FP32-accumulating CPU reference
 - [x] CUDA Event benchmark with median/p95 latency and environment metadata
-- [ ] Device-side persistent schedulers
+- [x] Explicit SM100a one-SM TMA/warp-specialized dense kernel configuration
+- [x] CUTLASS persistent CLC tile-scheduler reference for the native dense path
+- [x] Native dense correctness test and small-`M` CUDA Event benchmark
+- [ ] Project-owned device-side expert-tile persistent schedulers

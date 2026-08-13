@@ -19,7 +19,7 @@ endif()
 
 add_library(blackwell_moe_cutlass_headers INTERFACE)
 target_include_directories(blackwell_moe_cutlass_headers INTERFACE
-  ${cutlass_SOURCE_DIR}/include)
+  ${cutlass_SOURCE_DIR}/include
+  ${cutlass_SOURCE_DIR}/tools/util/include)
 target_compile_definitions(blackwell_moe_cutlass_headers INTERFACE
   BLACKWELL_MOE_CUTLASS_REVISION="${BLACKWELL_MOE_CUTLASS_TAG}")
-

@@ -3,7 +3,14 @@ cmake_minimum_required(VERSION 3.24)
 project(blackwell_moe_kernel_scheduler VERSION 0.1.0 LANGUAGES CXX)
 
 option(BLACKWELL_MOE_ENABLE_CUDA "Build CUDA kernel entry points" OFF)
+option(BLACKWELL_MOE_ENABLE_SM100_NATIVE
+       "Build SM100a-only TMA/tcgen05/TMEM kernels" OFF)
 option(BLACKWELL_MOE_BUILD_TESTS "Build unit tests" ON)
+
+if(BLACKWELL_MOE_ENABLE_SM100_NATIVE AND NOT BLACKWELL_MOE_ENABLE_CUDA)
+  message(FATAL_ERROR
+    "BLACKWELL_MOE_ENABLE_SM100_NATIVE requires BLACKWELL_MOE_ENABLE_CUDA=ON")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,6 +54,32 @@ if(BLACKWELL_MOE_ENABLE_CUDA)
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+
+  if(BLACKWELL_MOE_ENABLE_SM100_NATIVE)
+    # tcgen05 and TMEM are architecture-accelerated features. A plain sm_100
+    # target is insufficient: this translation unit must be compiled for
+    # compute_100a/sm_100a. CUDA_ARCHITECTURES is disabled only on this target
+    # so the explicit native flag does not produce a duplicate sm_100 image.
+    add_library(blackwell_moe_sm100 src/kernels/sm100_dense_gemm.cu)
+    target_include_directories(blackwell_moe_sm100 PUBLIC include)
+    target_link_libraries(blackwell_moe_sm100
+      PUBLIC blackwell_moe_cuda
+      PRIVATE blackwell_moe_cutlass_headers CUDA::cudart)
+    target_compile_options(blackwell_moe_sm100 PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:--generate-code=arch=compute_100a,code=sm_100a>)
+    set_target_properties(blackwell_moe_sm100 PROPERTIES
+      CUDA_STANDARD 17
+      CUDA_STANDARD_REQUIRED ON
+      CUDA_ARCHITECTURES OFF)
+
+    add_executable(sm100_dense_bench benchmarks/sm100_dense_benchmark.cu)
+    target_link_libraries(sm100_dense_bench PRIVATE
+      blackwell_moe_sm100 blackwell_moe_cutlass_headers CUDA::cudart)
+    set_target_properties(sm100_dense_bench PROPERTIES
+      CUDA_STANDARD 17
+      CUDA_STANDARD_REQUIRED ON
+      CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+  endif()
 endif()
 
 if(BLACKWELL_MOE_BUILD_TESTS)
@@ -69,5 +102,18 @@ if(BLACKWELL_MOE_BUILD_TESTS)
       CUDA_STANDARD_REQUIRED ON
       CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
     add_test(NAME cutlass_correctness COMMAND test_cutlass_correctness)
+
+    if(BLACKWELL_MOE_ENABLE_SM100_NATIVE)
+      add_executable(test_sm100_dense_correctness
+        tests/test_sm100_dense_correctness.cu)
+      target_link_libraries(test_sm100_dense_correctness PRIVATE
+        blackwell_moe_sm100 blackwell_moe_cutlass_headers CUDA::cudart)
+      set_target_properties(test_sm100_dense_correctness PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+      add_test(NAME sm100_dense_correctness
+               COMMAND test_sm100_dense_correctness)
+    endif()
   endif()
 endif()
