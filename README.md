@@ -181,8 +181,13 @@ Inspect a workload and its expert-tile imbalance:
   --distribution=zipf \
   --scheduler=static_persistent \
   --experts=64 \
-  --tokens=4096
+  --tokens=4096 \
+  --ctas=120
 ```
+
+This CPU-side model reports tile padding, CTA work imbalance, tail ratio,
+estimated utilization, and expert switches without claiming GPU latency. See
+[`docs/scheduler_model.md`](docs/scheduler_model.md).
 
 Generate a routing workload without third-party Python packages:
 
@@ -206,6 +211,7 @@ benchmark. See [`docs/phase2_testing.md`](docs/phase2_testing.md).
 - [x] Routing and expert-tile imbalance metrics
 - [x] Expert-tile decomposition
 - [x] Host reference expert-order and static-persistent assignment
+- [x] CPU persistent-scheduler simulator and CTA assignment metrics
 - [x] Benchmark metadata CLI and unit tests
 - [x] Pinned CUTLASS v4.6.0 BF16 grouped-GEMM baseline
 - [x] Reusable grouped-GEMM plan with untimed metadata initialization

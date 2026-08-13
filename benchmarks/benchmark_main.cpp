@@ -23,9 +23,9 @@ void print_help() {
       << "  --distribution=uniform|heavy_hitter|sparse|zipf\n"
       << "  --scheduler=expert_order|static_persistent|dynamic_queue|compacted|auto\n"
       << "  --experts=N --tokens=N --n=N --k=N --tile-m=N --tile-n=N\n"
-      << "  --seed=N --csv\n\n"
-      << "Phase 1 measures workload and host scheduling metadata only; it does not\n"
-      << "report GPU kernel latency.\n";
+      << "  --ctas=N --seed=N --csv\n\n"
+      << "Reports workload metadata and CPU scheduler-model metrics only; it does\n"
+      << "not report or predict GPU kernel latency.\n";
 }
 
 }  // namespace
@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
     blackwell_moe::WorkloadConfig config;
     blackwell_moe::GemmShape shape;
     auto scheduler = blackwell_moe::SchedulerKind::kExpertOrder;
+    std::uint32_t cta_count = 120;
     bool csv = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -63,6 +64,8 @@ int main(int argc, char** argv) {
         shape.tile_m = std::stoul(value_after_equals(argument));
       } else if (argument.rfind("--tile-n=", 0) == 0) {
         shape.tile_n = std::stoul(value_after_equals(argument));
+      } else if (argument.rfind("--ctas=", 0) == 0) {
+        cta_count = std::stoul(value_after_equals(argument));
       } else {
         throw std::invalid_argument("unknown argument: " + argument);
       }
@@ -74,20 +77,30 @@ int main(int argc, char** argv) {
     const auto tiles = blackwell_moe::build_expert_tiles(
         workload.tokens_per_expert, shape,
         scheduler == blackwell_moe::SchedulerKind::kCompacted);
+    const auto assignment = blackwell_moe::simulate_scheduler(
+        scheduler, workload.tokens_per_expert, shape, cta_count);
+    const auto schedule_metrics =
+        blackwell_moe::compute_schedule_metrics(assignment, shape);
 
     if (csv) {
       std::cout << "distribution,scheduler,experts,total_tokens,active_experts,"
                    "cv_m,max_over_mean,inactive_ratio,small_m_ratio,tile_cv,"
-                   "total_tiles,n,k,tile_m,tile_n,seed\n";
+                   "total_tiles,ctas,cta_work_cv,tail_ratio,estimated_utilization,"
+                   "useful_work_ratio,expert_switches,n,k,tile_m,tile_n,seed\n";
       std::cout << blackwell_moe::to_string(config.distribution) << ','
                 << blackwell_moe::to_string(scheduler) << ',' << config.experts
                 << ',' << config.total_tokens << ',' << metrics.active_experts
                 << ',' << metrics.coefficient_of_variation << ','
                 << metrics.max_over_mean << ',' << metrics.inactive_expert_ratio
                 << ',' << metrics.small_m_expert_ratio << ','
-                << metrics.tile_count_cv << ',' << tiles.size() << ',' << shape.n
-                << ',' << shape.k << ',' << shape.tile_m << ',' << shape.tile_n
-                << ',' << config.seed << '\n';
+                << metrics.tile_count_cv << ',' << tiles.size() << ','
+                << cta_count << ',' << schedule_metrics.cta_work_cv << ','
+                << schedule_metrics.tail_ratio << ','
+                << schedule_metrics.estimated_utilization << ','
+                << schedule_metrics.useful_work_ratio << ','
+                << schedule_metrics.expert_switches << ',' << shape.n << ','
+                << shape.k << ',' << shape.tile_m << ',' << shape.tile_n << ','
+                << config.seed << '\n';
     } else {
       std::cout << std::fixed << std::setprecision(4)
                 << "distribution:       " << blackwell_moe::to_string(config.distribution) << '\n'
@@ -100,7 +113,16 @@ int main(int argc, char** argv) {
                 << "inactive ratio:     " << metrics.inactive_expert_ratio << '\n'
                 << "small-M ratio:      " << metrics.small_m_expert_ratio << '\n'
                 << "tile-count CV:      " << metrics.tile_count_cv << '\n'
-                << "expert tiles:       " << tiles.size() << '\n';
+                << "expert tiles:       " << tiles.size() << '\n'
+                << "simulated CTAs:     " << cta_count << '\n'
+                << "CTA work CV:        " << schedule_metrics.cta_work_cv << '\n'
+                << "tail ratio:         " << schedule_metrics.tail_ratio << '\n'
+                << "est. utilization:   "
+                << schedule_metrics.estimated_utilization << '\n'
+                << "useful-work ratio:  "
+                << schedule_metrics.useful_work_ratio << '\n'
+                << "expert switches:    "
+                << schedule_metrics.expert_switches << '\n';
     }
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {
@@ -108,4 +130,3 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 }
-
