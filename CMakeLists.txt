@@ -37,7 +37,9 @@ if(BLACKWELL_MOE_ENABLE_CUDA)
   include(cmake/CudaArch.cmake)
   include(cmake/Dependencies.cmake)
 
-  add_library(blackwell_moe_cuda src/kernels/cutlass_baseline.cu)
+  add_library(blackwell_moe_cuda
+    src/kernels/cutlass_baseline.cu
+    src/kernels/scheduler_probe.cu)
   target_include_directories(blackwell_moe_cuda PUBLIC include)
   target_link_libraries(blackwell_moe_cuda
     PUBLIC blackwell_moe_core
@@ -51,6 +53,15 @@ if(BLACKWELL_MOE_ENABLE_CUDA)
   target_link_libraries(moe_gpu_bench PRIVATE
     blackwell_moe_cuda blackwell_moe_cutlass_headers CUDA::cudart)
   set_target_properties(moe_gpu_bench PROPERTIES
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+
+  add_executable(moe_scheduler_gpu_bench
+    benchmarks/scheduler_gpu_benchmark.cu)
+  target_link_libraries(moe_scheduler_gpu_bench PRIVATE
+    blackwell_moe_cuda blackwell_moe_cutlass_headers CUDA::cudart)
+  set_target_properties(moe_scheduler_gpu_bench PROPERTIES
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
@@ -121,6 +132,15 @@ if(BLACKWELL_MOE_BUILD_TESTS)
       CUDA_STANDARD_REQUIRED ON
       CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
     add_test(NAME cutlass_correctness COMMAND test_cutlass_correctness)
+
+    add_executable(test_scheduler_probe tests/test_scheduler_probe.cu)
+    target_link_libraries(test_scheduler_probe PRIVATE
+      blackwell_moe_cuda CUDA::cudart)
+    set_target_properties(test_scheduler_probe PROPERTIES
+      CUDA_STANDARD 17
+      CUDA_STANDARD_REQUIRED ON
+      CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+    add_test(NAME scheduler_probe COMMAND test_scheduler_probe)
 
     if(BLACKWELL_MOE_ENABLE_SM100_NATIVE)
       add_executable(test_sm100_dense_correctness

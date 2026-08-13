@@ -13,5 +13,15 @@ struct DynamicQueueState {
   std::uint32_t claim_size = 1;
 };
 
-}  // namespace blackwell_moe
+#if defined(__CUDACC__)
+// Returns the first tile in a claimed half-open interval.  The caller clamps
+// begin + claim_size to tile_count.  Keeping this primitive in the scheduler
+// ABI lets the GEMM kernel and the standalone scheduler benchmark share the
+// exact same queue semantics.
+__device__ __forceinline__ std::uint32_t claim_dynamic_tiles(
+    const DynamicQueueState& queue) {
+  return atomicAdd(queue.next_tile, queue.claim_size);
+}
+#endif
 
+}  // namespace blackwell_moe
