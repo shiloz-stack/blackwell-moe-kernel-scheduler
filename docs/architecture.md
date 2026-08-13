@@ -19,6 +19,9 @@ The inference engine is outside the project boundary. It supplies token counts a
   TMA/warp-specialized policy, tcgen05 math, and TMEM accumulation.
 - Phase 3B: direct CuTe implementation that exposes TMA barriers, TMEM
   allocation, tcgen05 issue, and the epilogue data movement in project code.
+  The first bring-up version accepts complete `128x256x64` tiles and writes
+  FP32 so architecture synchronization can be validated before predication and
+  output conversion are introduced.
 - Phase 4: connect the validated native math pipeline to a static persistent
   expert-tile scheduler, followed by active-expert compaction and a dynamic
   queue.

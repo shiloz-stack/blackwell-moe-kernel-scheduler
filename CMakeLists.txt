@@ -60,7 +60,9 @@ if(BLACKWELL_MOE_ENABLE_CUDA)
     # target is insufficient: this translation unit must be compiled for
     # compute_100a/sm_100a. CUDA_ARCHITECTURES is disabled only on this target
     # so the explicit native flag does not produce a duplicate sm_100 image.
-    add_library(blackwell_moe_sm100 src/kernels/sm100_dense_gemm.cu)
+    add_library(blackwell_moe_sm100
+      src/kernels/sm100_dense_gemm.cu
+      src/kernels/direct_cute_gemm.cu)
     target_include_directories(blackwell_moe_sm100 PUBLIC include)
     target_link_libraries(blackwell_moe_sm100
       PUBLIC blackwell_moe_cuda
@@ -76,6 +78,14 @@ if(BLACKWELL_MOE_ENABLE_CUDA)
     target_link_libraries(sm100_dense_bench PRIVATE
       blackwell_moe_sm100 blackwell_moe_cutlass_headers CUDA::cudart)
     set_target_properties(sm100_dense_bench PROPERTIES
+      CUDA_STANDARD 17
+      CUDA_STANDARD_REQUIRED ON
+      CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+
+    add_executable(direct_cute_bench benchmarks/direct_cute_benchmark.cu)
+    target_link_libraries(direct_cute_bench PRIVATE
+      blackwell_moe_sm100 blackwell_moe_cutlass_headers CUDA::cudart)
+    set_target_properties(direct_cute_bench PROPERTIES
       CUDA_STANDARD 17
       CUDA_STANDARD_REQUIRED ON
       CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
@@ -114,6 +124,17 @@ if(BLACKWELL_MOE_BUILD_TESTS)
         CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
       add_test(NAME sm100_dense_correctness
                COMMAND test_sm100_dense_correctness)
+
+      add_executable(test_direct_cute_correctness
+        tests/test_direct_cute_correctness.cu)
+      target_link_libraries(test_direct_cute_correctness PRIVATE
+        blackwell_moe_sm100 blackwell_moe_cutlass_headers CUDA::cudart)
+      set_target_properties(test_direct_cute_correctness PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_ARCHITECTURES "${BLACKWELL_MOE_CUDA_ARCHITECTURES}")
+      add_test(NAME direct_cute_correctness
+               COMMAND test_direct_cute_correctness)
     endif()
   endif()
 endif()

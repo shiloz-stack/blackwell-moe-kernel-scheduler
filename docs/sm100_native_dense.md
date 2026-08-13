@@ -1,13 +1,14 @@
 # SM100-Native Dense GEMM Bring-Up
 
-This stage adds a deliberately small Blackwell-native GEMM before changing the
-MoE scheduler. It separates two risks:
+This stage contains two deliberately small Blackwell-native GEMMs before
+changing the MoE scheduler. It separates two risks:
 
 1. Can the repository build and execute an SM100a TMA/tcgen05/TMEM pipeline?
 2. Can that pipeline later be driven by irregular `(expert, tile_m, tile_n)`
    work?
 
-Only the first question is addressed here. The existing grouped-GEMM baseline
+The collective reference and the direct CuTe implementation address the first
+question at different abstraction levels. The existing grouped-GEMM baseline
 remains unchanged and is still the reference for irregular MoE workloads.
 
 ## Kernel contract
@@ -39,6 +40,35 @@ methodology, and the later MoE expert-tile integration. This distinction
 matters: this stage is a native pipeline bring-up, not yet a handwritten CuTe
 kernel or a project-owned scheduler.
 
+## Direct CuTe kernel
+
+`src/kernels/direct_cute_gemm.cu` expands the important operations that the
+collective reference hides:
+
+1. `make_tma_atom` builds TMA descriptors for A and B on the host;
+2. `tma_partition` maps each complete input tile into swizzled shared memory;
+3. `tma_barrier` tracks GMEM-to-SMEM completion while `mma_barrier` protects
+   shared-memory reuse;
+4. `TMEM::Allocator1Sm` allocates and explicitly frees the accumulator region;
+5. `SM100_MMA_F16BF16_SS` selects the one-SM BF16 `tcgen05.mma` atom;
+6. `cute::gemm` issues the MMA operations from SMEM descriptors into TMEM;
+7. `SM100_TMEM_LOAD_32dp32b1x` and `copy` perform the `tcgen05.ld`
+   TMEM-to-register epilogue before normal FP32 global stores.
+
+The first direct kernel deliberately supports only complete tiles:
+
+```text
+M % 128 == 0
+N % 256 == 0
+K % 64  == 0
+```
+
+It writes FP32 output, while the collective reference writes BF16. Therefore
+their timings should initially be treated as independent bring-up measurements,
+not a final apples-to-apples kernel comparison. Boundary predication, BF16
+conversion, and pipelined multi-stage buffering come after this correctness
+gate.
+
 ## Build on B100/B200/GB200
 
 The `a` suffix is required. `sm_100` alone does not enable architecture-
@@ -67,11 +97,15 @@ ctest --test-dir build-sm100 --output-on-failure
 
 ./build-sm100/test_sm100_dense_correctness \
   2>&1 | tee results/b200_sm100_dense_correctness.log
+
+./build-sm100/test_direct_cute_correctness \
+  2>&1 | tee results/b200_direct_cute_correctness.log
 ```
 
 The native test executes a `128 x 128 x 64` GEMM and compares every BF16 output
-against an FP32-accumulating CPU reference. Do not publish performance numbers
-until this test passes.
+against an FP32-accumulating CPU reference. The direct CuTe test separately
+executes a `128 x 256 x 64` GEMM with FP32 output. Do not publish performance
+numbers until both tests pass.
 
 ## Initial benchmark sweep
 
@@ -98,13 +132,32 @@ These rows establish the native kernel's small-`M` utilization curve. They are
 not yet an apples-to-apples replacement for the grouped baseline because each
 run contains one dense problem rather than all experts in one launch.
 
+Run the direct CuTe smoke case after both correctness tests pass:
+
+```bash
+./build-sm100/direct_cute_bench \
+  --m=128 --n=7168 --k=2048 \
+  --warmup=20 --iterations=200 --csv \
+  2>&1 | tee results/b200_direct_cute_smoke.csv
+```
+
+Then collect complete-tile M points:
+
+```bash
+for m in 128 256 512 1024; do
+  ./build-sm100/direct_cute_bench \
+    --m="${m}" --n=7168 --k=2048 \
+    --seed=2026 --warmup=20 --iterations=200 --csv
+done 2>&1 | tee results/b200_direct_cute_m_sweep.csv
+```
+
 ## What comes next
 
 After B200 correctness and timing pass:
 
 1. inspect the generated kernel with Nsight Compute and SASS tools;
-2. implement the same dataflow directly with CuTe so TMA barriers, TMEM
-   allocation, `tcgen05.mma`, and TMEM-to-register epilogue movement are visible;
+2. add boundary predication, BF16 output conversion, and multi-stage buffering
+   to the direct CuTe path;
 3. preserve the validated collective kernel as a reference;
 4. connect the native math pipeline to persistent expert-tile work assignment;
 5. compare static and dynamic/CLC-assisted scheduling under routing skew.

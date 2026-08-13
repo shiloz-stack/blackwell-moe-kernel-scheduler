@@ -139,7 +139,7 @@ All benchmark reports will record GPU model, clocks or power mode when relevant,
 - [x] Record expert-level and tile-level imbalance metrics
 - [x] Implement expert-tile decomposition and CPU scheduler simulation
 - [ ] Validate the SM100a one-SM TMA/tcgen05/TMEM dense kernel on B200
-- [ ] Implement the native dataflow directly with CuTe
+- [ ] Validate the direct CuTe TMA/tcgen05/TMEM kernel on B200
 - [ ] Implement static persistent scheduling
 - [ ] Implement dynamic work distribution
 - [ ] Add active-expert compaction
@@ -228,4 +228,6 @@ See [`docs/sm100_native_dense.md`](docs/sm100_native_dense.md).
 - [x] Explicit SM100a one-SM TMA/warp-specialized dense kernel configuration
 - [x] CUTLASS persistent CLC tile-scheduler reference for the native dense path
 - [x] Native dense correctness test and small-`M` CUDA Event benchmark
+- [x] Direct CuTe TMA barriers, TMEM allocation, tcgen05 MMA, and TMEM-load epilogue
+- [x] Direct CuTe CPU-reference correctness test and benchmark harness
 - [ ] Project-owned device-side expert-tile persistent schedulers
