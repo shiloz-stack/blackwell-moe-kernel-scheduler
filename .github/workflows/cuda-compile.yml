@@ -1,0 +1,68 @@
+name: CUDA compile
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cuda-compile.yml"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "include/**"
+      - "src/**"
+      - "benchmarks/**"
+      - "tests/**"
+  pull_request:
+    paths:
+      - ".github/workflows/cuda-compile.yml"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "include/**"
+      - "src/**"
+      - "benchmarks/**"
+      - "tests/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sm100a-compile:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.0.1-devel-ubuntu24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Install build tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            build-essential cmake ca-certificates git
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          cmake --version
+          nvcc --version
+          g++ --version
+
+      - name: Configure SM100a targets
+        run: |
+          cmake -S . -B build-sm100-ci -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBLACKWELL_MOE_ENABLE_CUDA=ON \
+            -DBLACKWELL_MOE_ENABLE_SM100_NATIVE=ON \
+            -DBLACKWELL_MOE_CUDA_ARCHITECTURES=100 \
+            -DBLACKWELL_MOE_BUILD_TESTS=ON
+
+      - name: Compile all CPU and CUDA targets
+        run: cmake --build build-sm100-ci --parallel 2
+
+      - name: Run CPU-only tests
+        run: |
+          ./build-sm100-ci/test_workload
+          ./build-sm100-ci/test_scheduler
