@@ -37,15 +37,19 @@
 #include <cstdint>
 #include <limits>
 
-#include "cute/algorithm/cooperative_copy.hpp"
-#include "cute/arch/cluster_sm90.hpp"
-#include "cute/arch/tmem_allocator_sm100.hpp"
-#include "cute/numeric/integral_constant.hpp"
-#include "cute/tensor.hpp"
 #include "cutlass/arch/barrier.h"
 #include "cutlass/bfloat16.h"
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/cutlass.h"
+
+// Keep the CuTe include order aligned with the SM100 tutorials.  Several
+// algorithm headers consume Tensor and Copy_Atom declarations but do not own
+// those declarations themselves.
+#include "cute/tensor.hpp"
+#include "cute/arch/cluster_sm90.hpp"
+#include "cute/numeric/integral_constant.hpp"
+#include "cute/algorithm/cooperative_copy.hpp"
+#include "cute/arch/tmem_allocator_sm100.hpp"
 
 namespace blackwell_moe {
 namespace {
