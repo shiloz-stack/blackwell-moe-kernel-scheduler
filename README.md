@@ -2,7 +2,7 @@
 
 A kernel-level exploration of **persistent expert-tile scheduling** and **workload-aware dispatch** for irregular Mixture-of-Experts (MoE) inference on NVIDIA Blackwell GPUs.
 
-> **Status:** Work in progress. The CUTLASS BF16 grouped baseline is validated on NVIDIA B200. Direct CuTe, 1-SM/2-SM native collectives, and project-owned GPU scheduler probes compile for SM100a in CI and await their B200 correctness/performance gate.
+> **Status:** Work in progress. The CUTLASS BF16 grouped baseline is validated on NVIDIA B200. A project-owned TIRx BF16 static-persistent MoE kernel now implements the Blackwell TMA/tcgen05/TMEM/warp-specialized path and awaits its B200 correctness/performance gate.
 
 ## Motivation
 
@@ -126,6 +126,7 @@ All benchmark reports will record GPU model, clocks or power mode when relevant,
 .
 ├── benchmarks/        # Workload generation and benchmark runners
 ├── include/           # Scheduler policies and shared kernel interfaces
+├── python/            # TIRx kernel, workload planner, and B200 runner
 ├── src/               # CUDA/CuTe kernel implementations
 ├── tests/             # Correctness and scheduler unit tests
 ├── tools/             # Trace processing and result analysis
@@ -140,6 +141,7 @@ All benchmark reports will record GPU model, clocks or power mode when relevant,
 - [x] Implement expert-tile decomposition and CPU scheduler simulation
 - [ ] Validate the SM100a one-SM TMA/tcgen05/TMEM dense kernel on B200
 - [ ] Validate the direct CuTe TMA/tcgen05/TMEM kernel on B200
+- [ ] Validate the TIRx static-persistent BF16 MoE kernel on B200
 - [x] Implement and test static persistent GPU tile assignment
 - [x] Implement and test dynamic GPU work distribution with chunked claims
 - [x] Add active-expert compaction to the generated device work list
@@ -171,6 +173,27 @@ See [`docs/agent_assisted_workflow.md`](docs/agent_assisted_workflow.md), the
 versioned [`agent/search_space.yaml`](agent/search_space.yaml), and the reusable
 [`optimize-blackwell-moe-kernels` skill](skills/optimize-blackwell-moe-kernels/SKILL.md).
 This is not presented as a standalone autonomous kernel agent.
+
+Agent optimization is intentionally sequenced after the project-owned TIRx
+baseline. The current implementation first fixes the math pipeline and proves
+correctness; the later agent experiment will vary only scheduler policy and
+queue claim size under a bounded evaluation contract.
+
+## TIRx Blackwell Path
+
+The first direct TIRx implementation lives in
+[`python/blackwell_moe_tirx`](python/blackwell_moe_tirx). It compiles routed
+expert counts into `(expert_id, tile_m, tile_n)` work items and runs a BF16
+`128x128x64` static-persistent grouped GEMM with:
+
+- double-buffered TMA operand movement;
+- FP32 `tcgen05` accumulation in Tensor Memory;
+- producer/MMA/writeback warp specialization;
+- TMEM-to-register BF16 epilogue and TMA store;
+- CPU-testable work-list planning and a B200 correctness/median/p95 harness.
+
+See [`docs/tirx_moe_kernel.md`](docs/tirx_moe_kernel.md) for the exact scope,
+evidence boundary, environment, and validation commands.
 
 ## References
 
@@ -247,6 +270,9 @@ See [`docs/sm100_native_dense.md`](docs/sm100_native_dense.md).
 - [x] Two-SM TMA-multicast/tcgen05 collective reference and benchmark
 - [x] Project-owned device-side expert-tile persistent schedulers
 - [x] Exact-once GPU scheduler correctness and observed CTA-load metrics
+- [x] CPU-tested TIRx MoE work-list planner and active-expert compaction
+- [x] TIRx static-persistent TMA/tcgen05/TMEM/warp-specialized kernel source
+- [x] TIRx B200 correctness, generated-CUDA, and median/p95 benchmark harness
 
 Run the complete native-kernel and scheduler matrix with
 [`tools/run_b200_optimization_suite.sh`](tools/run_b200_optimization_suite.sh).

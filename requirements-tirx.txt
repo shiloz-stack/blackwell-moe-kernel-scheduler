@@ -1,0 +1,7 @@
+# TIRx ships as tvm.tirx in the Apache TVM wheel.
+apache-tvm==0.26.0
+cuda-bindings
+
+# Install a CUDA-enabled PyTorch build compatible with the B200 driver image.
+# PyTorch is intentionally not pinned here because the correct wheel index and
+# CUDA ABI depend on the remote machine image.
