@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimize Blackwell MoE Kernels"
+  short_description: "Guide measured Blackwell MoE kernel optimization"
+  default_prompt: "Use $optimize-blackwell-moe-kernels to plan the next measured optimization for this MoE kernel project."

@@ -158,6 +158,20 @@ The project will be considered successful when it can:
 4. demonstrate improvements on representative irregular workloads without hiding regressions;
 5. reproduce reported results from a clean checkout with documented hardware and software versions.
 
+## Agent-Assisted Optimization
+
+Development follows a **human-in-the-loop, agent-assisted kernel optimization
+workflow**. The workload taxonomy, legal transformation space, correctness
+gates, and B200 measurement contract are explicit so Codex can propose and
+implement bounded experiments without turning benchmark results into unsupported
+claims. The human operator remains responsible for trusted B200 execution and
+promotion decisions.
+
+See [`docs/agent_assisted_workflow.md`](docs/agent_assisted_workflow.md), the
+versioned [`agent/search_space.yaml`](agent/search_space.yaml), and the reusable
+[`optimize-blackwell-moe-kernels` skill](skills/optimize-blackwell-moe-kernels/SKILL.md).
+This is not presented as a standalone autonomous kernel agent.
+
 ## References
 
 Implementation references and exact upstream revisions will be added as dependencies are introduced. Likely foundations include NVIDIA CUTLASS/CuTe documentation, grouped-GEMM examples, and Blackwell architecture programming guidance.

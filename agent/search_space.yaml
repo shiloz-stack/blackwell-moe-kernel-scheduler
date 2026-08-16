@@ -1,0 +1,100 @@
+version: 1
+
+project_boundary:
+  in_scope:
+    - routing-aware workload characterization
+    - host launch-level kernel policy selection
+    - device-side persistent expert-tile scheduling
+    - Blackwell GEMM data movement and tensor-core pipelines
+    - correctness, latency, balance, and profiler evaluation
+  out_of_scope:
+    - model-level routing quality
+    - NCCL expert-parallel collectives
+    - token packing and unpacking for a full inference engine
+
+workload_taxonomy:
+  distributions: [uniform, heavy_hitter, sparse, zipf]
+  dimensions:
+    experts: [8, 16, 32, 64, 128]
+    total_tokens: [512, 1024, 2048, 4096, 8192, 16384]
+    n: [2048, 7168]
+    k: [1024, 2048]
+  required_features:
+    - cv_m
+    - max_over_mean_m
+    - inactive_expert_ratio
+    - small_m_expert_ratio
+    - active_tile_count
+    - useful_work_ratio
+
+optimization_axes:
+  scheduler:
+    policies: [expert_order, static_persistent, dynamic_queue, clc_assisted]
+    claim_size: [1, 2, 4, 8]
+    active_expert_compaction: [false, true]
+  math_pipeline:
+    implementations: [cutlass_grouped_baseline, direct_cute, native_1sm, native_2sm]
+    mechanisms: [tma, tcgen05, tmem, warp_specialization, persistent_cta, clc]
+  launch_dispatch:
+    observable_inputs:
+      - routing_skew
+      - active_tile_count
+      - inactive_expert_ratio
+      - small_m_expert_ratio
+      - large_expert_ratio
+    candidate_outputs:
+      - cutlass_grouped_baseline
+      - compacted_small_m
+      - static_persistent_1sm
+      - dynamic_persistent_1sm
+      - clc_persistent_1sm
+      - native_2sm
+
+controlled_variables:
+  - random_seed
+  - input_data
+  - dtype
+  - gemm_shape
+  - warmup_count
+  - iteration_count
+  - gpu_clock_and_power_state
+  - cuda_and_cutlass_revision
+  - timing_boundary
+
+objectives:
+  hard_constraints:
+    - reference_correctness
+    - exact_once_tile_coverage
+    - no_out_of_bounds_access
+    - stable_stream_semantics
+  minimize:
+    - median_kernel_ms
+    - p95_kernel_ms
+    - cta_tail_ratio
+    - queue_and_dispatch_overhead
+  maximize:
+    - effective_tflops
+    - useful_work_ratio
+    - observed_cta_utilization
+
+promotion_gates:
+  - cpu_unit_tests
+  - sm100a_compile
+  - b200_correctness
+  - b200_repeated_timing
+  - profiler_explanation
+  - held_out_dispatch_validation
+
+invalid_comparisons:
+  - scheduler_probe_latency_vs_grouped_gemm_latency
+  - different_workloads_without_normalization
+  - best_single_iteration_as_reported_latency
+  - compile_only_result_as_hardware_validation
+  - speedup_that_excludes_new_required_preprocessing
+
+search_policy:
+  - change_one_causal_axis_per_experiment
+  - run_cheap_gates_before_b200
+  - preserve_negative_results
+  - prefer_crossover_models_over_universal_winner_claims
+  - never_invent_dispatch_thresholds_without_held_out_data
