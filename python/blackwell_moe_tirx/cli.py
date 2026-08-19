@@ -6,12 +6,17 @@ import argparse
 from pathlib import Path
 
 from .config import TIRxMoESpec, build_workload_plan
+from .dispatch import routing_features, select_kernel
+from .kernels import list_versions
 from .runner import BenchmarkResult, run_benchmark
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compile and benchmark the static-persistent TIRx MoE kernel on B200"
+        description="Compile and benchmark a versioned TIRx MoE kernel on B200"
+    )
+    parser.add_argument(
+        "--kernel", choices=("auto", *list_versions()), default="v1_static_ws"
     )
     parser.add_argument(
         "--distribution",
@@ -25,6 +30,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--ctas", type=int, default=148)
     parser.add_argument("--pipe-depth", type=int, default=2)
+    parser.add_argument("--claim-size", type=int, default=4)
+    parser.add_argument("--hybrid-main-claim-size", type=int, default=8)
+    parser.add_argument(
+        "--hybrid-tail-tiles",
+        type=int,
+        default=296,
+        help="V4 tiles reserved for claim-1 tail acquisition",
+    )
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iterations", type=int, default=200)
     parser.add_argument("--correctness-only", action="store_true")
@@ -44,7 +57,8 @@ def main() -> None:
         args.experts = 4
         args.tokens = 128
         args.n = 256
-        args.k = 64
+        # Four K tiles exercise both stages and a complete phase wrap.
+        args.k = 256
         args.warmup = min(args.warmup, 5)
         args.iterations = min(args.iterations, 20)
 
@@ -55,11 +69,16 @@ def main() -> None:
         k=args.k,
         cta_count=args.ctas,
         pipe_depth=args.pipe_depth,
+        claim_size=args.claim_size,
+        hybrid_main_claim_size=args.hybrid_main_claim_size,
+        hybrid_tail_tiles=args.hybrid_tail_tiles,
     )
     plan = build_workload_plan(spec, args.distribution, seed=args.seed)
+    selected_kernel = select_kernel(spec, plan) if args.kernel == "auto" else args.kernel
     result = run_benchmark(
         spec,
         plan,
+        version=selected_kernel,
         warmup=args.warmup,
         iterations=args.iterations,
         correctness_only=args.correctness_only,
@@ -70,8 +89,10 @@ def main() -> None:
         print(BenchmarkResult.csv_header())
         print(result.csv_row())
     else:
+        features = routing_features(spec, plan)
         print(
             f"TIRx BF16 MoE correctness passed on {result.device}: "
+            f"kernel={selected_kernel}, "
             f"active_experts={result.active_experts}, tiles={result.tiles}, "
             f"max_abs_error={result.max_abs_error:.6g}, "
             f"max_rel_error={result.max_rel_error:.6g}"
@@ -81,6 +102,13 @@ def main() -> None:
                 f"median={result.median_ms:.6f} ms, p95={result.p95_ms:.6f} ms, "
                 f"effective={result.effective_tflops:.3f} TFLOP/s, "
                 f"useful_work_ratio={result.useful_work_ratio:.3%}"
+            )
+        if args.kernel == "auto":
+            print(
+                "bootstrap dispatch features: "
+                f"cv_m={features.cv_m:.3f}, "
+                f"inactive_experts={features.inactive_expert_ratio:.3%}, "
+                f"tiles_per_cta={features.tiles_per_cta:.3f}"
             )
 
 
