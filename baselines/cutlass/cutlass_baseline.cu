@@ -120,8 +120,8 @@ struct Bf16GroupedGemmPlan::Impl {
   // The following arrays live on the GPU. Entry p in every array describes the
   // same active expert problem: its [M, N, K], matrix pointers, and strides.
   cutlass::gemm::GemmCoord* problem_sizes = nullptr;
-  ElementA** ptr_a = nullptr;
-  ElementB** ptr_b = nullptr;
+  ElementA const** ptr_a = nullptr;
+  ElementB const** ptr_b = nullptr;
   ElementOutput** ptr_c = nullptr;
   ElementOutput** ptr_d = nullptr;
   std::int64_t* lda = nullptr;
@@ -226,10 +226,8 @@ KernelStatus Bf16GroupedGemmPlan::initialize(
   }
   if (properties.major < 8) return KernelStatus::kUnsupportedDevice;
 
-  // The legacy grouped-GEMM Arguments API requires mutable pointer arrays,
-  // although the generated mainloop treats the A/B matrix payloads as read-only.
-  std::vector<ElementA*> host_a;
-  std::vector<ElementB*> host_b;
+  std::vector<ElementA const*> host_a;
+  std::vector<ElementB const*> host_b;
   std::vector<ElementOutput*> host_c;
   std::vector<ElementOutput*> host_d;
   std::vector<std::int64_t> host_lda;
@@ -252,10 +250,8 @@ KernelStatus Bf16GroupedGemmPlan::initialize(
     }
     // Problem p computes D_p[M_i, N] = A_p[M_i, K] * B_p[K, N].
     impl_->host_problem_sizes.emplace_back(m, args.n, args.k);
-    host_a.push_back(const_cast<ElementA*>(
-        static_cast<ElementA const*>(args.a[expert])));
-    host_b.push_back(const_cast<ElementB*>(
-        static_cast<ElementB const*>(args.b[expert])));
+    host_a.push_back(static_cast<ElementA const*>(args.a[expert]));
+    host_b.push_back(static_cast<ElementB const*>(args.b[expert]));
     // The epilogue uses beta = 0, so C is never read for its numerical value.
     // Reusing D as C avoids allocating a separate source matrix.
     host_c.push_back(static_cast<ElementOutput*>(args.d[expert]));

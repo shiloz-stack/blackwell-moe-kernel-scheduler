@@ -49,7 +49,7 @@ Options parse_options(int argc, char** argv) {
       options.csv = true;
     } else if (argument == "--help" || argument == "-h") {
       std::cout
-          << "Usage: moe_gpu_bench [options]\n"
+          << "Usage: moe_cutlass_baseline_bench [options]\n"
           << "  --distribution=uniform|heavy_hitter|sparse|zipf\n"
           << "  --experts=N --tokens=N --n=N --k=N --seed=N\n"
           << "  --warmup=N --iterations=N --csv\n";

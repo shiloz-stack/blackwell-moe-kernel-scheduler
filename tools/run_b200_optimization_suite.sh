@@ -23,12 +23,12 @@ append_csv() {
 }
 
 for binary in \
-  test_cutlass_correctness \
+  test_cutlass_baseline_correctness \
   test_scheduler_probe \
   test_sm100_dense_correctness \
   test_sm100_2sm_correctness \
   test_direct_cute_correctness \
-  moe_gpu_bench \
+  moe_cutlass_baseline_bench \
   moe_scheduler_gpu_bench \
   sm100_dense_bench \
   sm100_2sm_bench \
@@ -55,7 +55,7 @@ ctest --test-dir "${build_dir}" --output-on-failure \
 baseline_csv="${results_dir}/grouped_baseline.csv"
 : >"${baseline_csv}"
 for distribution in uniform heavy_hitter sparse zipf; do
-  append_csv "${baseline_csv}" "${build_dir}/moe_gpu_bench" \
+  append_csv "${baseline_csv}" "${build_dir}/moe_cutlass_baseline_bench" \
     "--distribution=${distribution}" \
     --experts=64 --tokens=4096 --n=7168 --k=2048 \
     "--warmup=${warmup}" "--iterations=${iterations}"

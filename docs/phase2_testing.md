@@ -19,6 +19,7 @@ For B300 (SM103), use CUDA 13.0 or newer. For GeForce RTX 50-series (SM120), ove
 ```bash
 cmake -S . -B build \
   -DBLACKWELL_MOE_ENABLE_CUDA=ON \
+  -DBLACKWELL_MOE_BUILD_CUTLASS_BASELINE=ON \
   -DBLACKWELL_MOE_CUDA_ARCHITECTURES=100 \
   -DBLACKWELL_MOE_BUILD_TESTS=ON
 cmake --build build -j
@@ -29,6 +30,7 @@ cmake --build build -j
 ```bash
 cmake -S . -B build \
   -DBLACKWELL_MOE_ENABLE_CUDA=ON \
+  -DBLACKWELL_MOE_BUILD_CUTLASS_BASELINE=ON \
   -DBLACKWELL_MOE_CUDA_ARCHITECTURES=120 \
   -DBLACKWELL_MOE_BUILD_TESTS=ON
 cmake --build build -j
@@ -50,7 +52,7 @@ ctest --test-dir build --output-on-failure
 Run only the grouped-GEMM test:
 
 ```bash
-./build/test_cutlass_correctness
+./build/test_cutlass_baseline_correctness
 ```
 
 The test covers irregular expert sizes `[7, 0, 13, 31]`, filters the inactive expert, computes each active expert GEMM in one grouped launch, and compares BF16 output with an FP32-accumulating CPU reference. Do not collect performance results until this test passes.
@@ -60,14 +62,14 @@ The test covers irregular expert sizes `[7, 0, 13, 31]`, filters the inactive ex
 Start with the small default problem:
 
 ```bash
-./build/moe_gpu_bench
+./build/moe_cutlass_baseline_bench
 ```
 
 Then sweep routing distributions using the same matrix dimensions:
 
 ```bash
 for distribution in uniform heavy_hitter sparse zipf; do
-  ./build/moe_gpu_bench \
+  ./build/moe_cutlass_baseline_bench \
     --distribution=${distribution} \
     --experts=64 \
     --tokens=4096 \
