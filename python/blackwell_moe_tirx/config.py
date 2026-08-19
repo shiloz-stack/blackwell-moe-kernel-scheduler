@@ -30,6 +30,9 @@ class TIRxMoESpec:
     tile_k: int = 64
     cta_count: int = 148
     pipe_depth: int = 2
+    claim_size: int = 4
+    hybrid_main_claim_size: int = 8
+    hybrid_tail_tiles: int = 296
     dtype: str = "bfloat16"
 
     def validate(self) -> None:
@@ -40,17 +43,23 @@ class TIRxMoESpec:
         if min(self.n, self.k, self.tile_m, self.tile_n, self.tile_k) <= 0:
             raise ValueError("matrix and tile dimensions must be positive")
         if self.n % self.tile_n:
-            raise ValueError("n must be divisible by tile_n in the first TIRx kernel")
+            raise ValueError("n must be divisible by tile_n in the current TIRx family")
         if self.k % self.tile_k:
-            raise ValueError("k must be divisible by tile_k in the first TIRx kernel")
+            raise ValueError("k must be divisible by tile_k in the current TIRx family")
         if (self.tile_m, self.tile_n, self.tile_k) != (128, 128, 64):
-            raise ValueError("the first tcgen05 kernel supports only a 128x128x64 CTA tile")
+            raise ValueError("the current tcgen05 family supports only a 128x128x64 CTA tile")
         if self.cta_count <= 0:
             raise ValueError("cta_count must be positive")
         if self.pipe_depth != 2:
-            raise ValueError("the first warp-specialized kernel requires pipe_depth=2")
+            raise ValueError("the current kernel family requires pipe_depth=2")
+        if self.claim_size <= 0:
+            raise ValueError("claim_size must be positive")
+        if self.hybrid_main_claim_size <= 0:
+            raise ValueError("hybrid_main_claim_size must be positive")
+        if self.hybrid_tail_tiles < 0:
+            raise ValueError("hybrid_tail_tiles must be non-negative")
         if self.dtype != "bfloat16":
-            raise ValueError("the first TIRx kernel supports BF16 inputs and output")
+            raise ValueError("the current TIRx family supports BF16 inputs and output")
 
 
 @dataclass(frozen=True)
@@ -83,9 +92,17 @@ class MoEWorkloadPlan:
         return 1.0 if self.padded_flops == 0 else self.logical_flops / self.padded_flops
 
     def device_worklist(self) -> list[list[int]]:
-        """Return the compact int32 metadata consumed by the GPU kernel."""
+        """Return ``(expert, m_tile_index, n_tile_index)`` int32 metadata.
 
-        return [[tile.expert_id, tile.tile_m, tile.tile_n] for tile in self.tiles]
+        Storing tile indices instead of element offsets preserves the alignment
+        proof needed by TIRx's runtime-coordinate TMA dispatcher.
+        """
+
+        # The first kernel contract fixes both M and N tile extents at 128.
+        return [
+            [tile.expert_id, tile.tile_m // 128, tile.tile_n // 128]
+            for tile in self.tiles
+        ]
 
 
 def _weights(
@@ -213,3 +230,38 @@ def static_cta_assignments(tile_count: int, cta_count: int) -> tuple[tuple[int, 
         tuple(range(cta_id, tile_count, cta_count))
         for cta_id in range(cta_count)
     )
+
+
+def chunked_claims(tile_count: int, claim_size: int) -> tuple[tuple[int, ...], ...]:
+    """Return the contiguous batches produced by a monotonic atomic queue."""
+
+    if tile_count < 0:
+        raise ValueError("tile_count must be non-negative")
+    if claim_size <= 0:
+        raise ValueError("claim_size must be positive")
+    return tuple(
+        tuple(range(begin, min(begin + claim_size, tile_count)))
+        for begin in range(0, tile_count, claim_size)
+    )
+
+
+def hybrid_claims(
+    tile_count: int,
+    main_claim_size: int,
+    tail_tiles: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Model V4: coarse expert-major chunks followed by claim-1 tail work."""
+
+    if tile_count < 0:
+        raise ValueError("tile_count must be non-negative")
+    if main_claim_size <= 0:
+        raise ValueError("main_claim_size must be positive")
+    if tail_tiles < 0:
+        raise ValueError("tail_tiles must be non-negative")
+    tail_begin = tile_count - min(tile_count, tail_tiles)
+    main = tuple(
+        tuple(range(begin, min(begin + main_claim_size, tail_begin)))
+        for begin in range(0, tail_begin, main_claim_size)
+    )
+    tail = tuple((tile,) for tile in range(tail_begin, tile_count))
+    return main + tail
