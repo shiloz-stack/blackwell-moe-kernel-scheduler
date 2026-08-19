@@ -10,6 +10,7 @@ export PYTHONPATH="${repo_root}/python${PYTHONPATH:+:${PYTHONPATH}}"
 python3 -c 'import torch, tvm, tvm.tirx; assert torch.cuda.is_available(); print(torch.__version__, tvm.__version__, torch.cuda.get_device_name())'
 
 python3 -m blackwell_moe_tirx.cli \
+  --kernel=v1_static_ws \
   --smoke \
   --correctness-only \
   --dump-cuda results/tirx_static_persistent_sm100a.cu \
@@ -17,6 +18,7 @@ python3 -m blackwell_moe_tirx.cli \
 
 for distribution in uniform heavy_hitter sparse zipf; do
   python3 -m blackwell_moe_tirx.cli \
+    --kernel=v1_static_ws \
     --distribution="${distribution}" \
     --experts=64 \
     --tokens=4096 \

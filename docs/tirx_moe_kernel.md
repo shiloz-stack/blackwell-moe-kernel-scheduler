@@ -1,58 +1,75 @@
-# TIRx MoE Kernel Baseline
+# Versioned TIRx Blackwell MoE Kernels
 
-This repository now contains a project-owned Blackwell MoE grouped-GEMM path
-in TIRx. It is intentionally the implementation baseline that comes **before**
-agent-driven tuning.
+Project-owned GPU kernels are implemented in TIRx. CUTLASS is retained only as
+an optional external baseline under `baselines/cutlass`.
 
-## What is implemented
+## Common problem contract
 
-The host planner converts routed token counts into a compact work list:
+The host planner compacts inactive experts and creates an expert-major list:
 
 ```text
-(expert_id, tile_m_offset, tile_n_offset)
+(expert_id, tile_m_index, tile_n_index)
 ```
 
-Inactive experts generate no work. Every active expert is decomposed into
-`128 x 128` output tiles. The initial kernel launches 148 persistent CTAs (one
-per B200 SM), and CTA `bx` walks tiles `bx`, `bx + 148`, and so on. This is the
-canonical **static persistent** policy; it has no global atomic queue.
+The kernel multiplies the indices by 128 before forming TMA coordinates; this
+keeps their alignment provable even though the metadata is loaded at runtime.
+Every version computes the same BF16 `128x128x64` work tile with FP32
+accumulation. A is zero padded to 128 rows, so only valid routed rows enter the
+logical-FLOP and correctness metrics. Keeping the worklist, math tile and
+epilogue fixed makes scheduler comparisons causal.
 
-Inside each CTA, two warpgroups have specialized roles:
+## Optimization journey
+
+| Version | CTA lifetime | Warp specialization | Acquisition |
+| --- | --- | --- | --- |
+| V0 | One work tile | No | `tile_id = blockIdx.x` |
+| V0.5 | Persistent | No | Static grid stride |
+| V1 | Persistent | Yes | Static grid stride |
+| V2 | Persistent | Yes | Atomic claim-1 queue |
+| V3 | Persistent | Yes | Atomic chunk queue |
+| V4 | Persistent | Yes | Coarse expert-major chunks plus claim-1 tail |
+| V5 | CLC workers | Yes | Blackwell Cluster Launch Control |
+
+V0 and V0.5 retain TMA double buffering, tcgen05, TMEM and the TMA epilogue.
+They remove only warp specialization and/or persistent execution.
+
+V1 splits a CTA into two warpgroups:
 
 | Role | Threads | Responsibility |
 | --- | --- | --- |
-| TMA producer | warpgroup 1, warp 3 | Move expert A/B tiles from HBM to double-buffered SMEM |
-| MMA consumer | warpgroup 1, warp 0 | Issue BF16 `tcgen05` MMA and accumulate FP32 in TMEM |
-| Writeback | warpgroup 0 | Move TMEM to registers, cast to BF16, stage in SMEM, and TMA-store to HBM |
+| TMA producer | WG1 warp 3 | Load per-expert A/B tiles into double-buffered SMEM |
+| MMA consumer | WG1 warp 0 | BF16 tcgen05 with FP32 TMEM accumulation |
+| Writeback | WG0 | TMEM to registers to BF16 SMEM, then TMA store |
 
-Four full/empty barriers coordinate the pipeline:
+V2-V4 reserve WG1 warp 2 for one scheduler lane. That lane is the only code
+allowed to update the queue. It publishes one `tile_id` through a CTA-local
+mailbox guarded by a full/empty mbarrier pipeline. Loader, MMA and writeback
+must all consume the same mailbox generation before it can be overwritten.
+This prevents the fatal design error in which the roles independently claim
+different tiles.
 
-```text
-TMA --tma2mma--> MMA --mma2ld--> writeback
-TMA <--mma2tma-- MMA <--ld2mma-- writeback
-```
+V4 divides the expert-major worklist into two disjoint regions. The main region
+uses a coarse atomic chunk to preserve contiguous expert locality and amortize
+atomics; the reserved tail uses claim-1 acquisition. Queue heads are initialized
+to `(0, tail_begin)`, so no tile is duplicated or skipped.
 
-The input A tensor is padded with zeros to a 128-row boundary. That lets the
-first kernel use full TMA tiles; only valid routed-token rows participate in the
-correctness comparison and logical-FLOP metric.
+V5 launches one CTA coordinate per work item. A resident CTA computes its own
+coordinate while a CLC request attempts to cancel a pending CTA launch. On
+success, the resident CTA inherits that coordinate as its next work item. It
+uses TIRx `ClusterLaunchControlScheduler`; it is not an emulated atomic queue.
 
 ## Evidence boundary
 
-The workload planner and its metadata invariants are covered by CPU-only unit
-tests. The TIRx source can only be lowered and executed with a TIRx-enabled TVM
-build and a Blackwell GPU. Until the B200 gate below passes, the repository
-must describe the kernel as **implemented and awaiting hardware validation**,
-not as correct or faster than the CUTLASS baseline.
+CPU tests cover worklist compaction, exact-once static/chunked/hybrid planning,
+version metadata and queue initialization. All seven sources pass the Apache
+TVM 0.26 TIRx parser and full SM100a lowering for smoke and production shapes
+across all four routing distributions. Generated source contains TMA and
+tcgen05 in every version, atomic acquisition in V2-V4, and CLC cancellation in
+V5. This machine has no Blackwell GPU, so numerical correctness, deadlock
+freedom and performance still require the B200 runtime gate. Do not claim a
+speedup until those measurements pass.
 
-Dynamic atomic claiming, CLC, two-CTA collectives, and agent parameter search
-are deliberately outside this first gate. They should be added only after the
-same static kernel passes generated-code inspection and numerical correctness.
-
-## B200 environment
-
-Use the CUDA 13 B200 machine and install the TIRx compiler dependencies in a
-virtual environment. Install a CUDA-enabled PyTorch wheel appropriate for the
-machine image separately.
+## Environment
 
 ```bash
 python3 -m venv .venv-tirx
@@ -63,55 +80,70 @@ python3 -m pip install -r requirements-tirx.txt
 python3 -c "import torch, tvm, tvm.tirx; print(torch.__version__, tvm.__version__, torch.cuda.get_device_name())"
 ```
 
-## Validation order
+The CLC version requires the TIRx release containing
+`tvm.tirx.lang.tile_scheduler.ClusterLaunchControlScheduler`.
 
-Run the low-memory shape first. It compiles the kernel, checks the result, and
-dumps generated CUDA so `tcgen05`, TMEM, TMA, and the barrier protocol can be
-inspected.
+## Test one version
+
+Start with V0, then proceed in order so a synchronization failure has a small
+diff surface:
 
 ```bash
 PYTHONPATH=python python3 -m blackwell_moe_tirx.cli \
+  --kernel=v0_nonpersistent \
   --smoke \
   --correctness-only \
-  --dump-cuda results/tirx_static_persistent_sm100a.cu
+  --dump-cuda=results/v0_nonpersistent.cu
 ```
 
-Then benchmark one representative shape:
+Example V3 benchmark:
 
 ```bash
 PYTHONPATH=python python3 -m blackwell_moe_tirx.cli \
+  --kernel=v3_chunked \
+  --claim-size=4 \
   --distribution=zipf \
-  --experts=64 \
-  --tokens=4096 \
-  --n=7168 \
-  --k=2048 \
-  --warmup=20 \
-  --iterations=200 \
-  --csv
+  --experts=64 --tokens=4096 --n=7168 --k=2048 \
+  --warmup=20 --iterations=200 --csv
 ```
 
-The complete four-distribution run is wrapped by
-`tools/run_b200_tirx_baseline.sh`. Each CSV records logical throughput and
-useful-work ratio so padded small-M computation is not hidden.
+Run the complete correctness and version matrix:
 
-## Next optimization boundary
-
-Once this gate is green, keep the math pipeline fixed and change only work
-claiming:
-
-```text
-static:  tile_id = cta_id; tile_id += cta_count
-dynamic: tile_id = atomicAdd(queue_head, claim_size)
+```bash
+BLACKWELL_MOE_WARMUP=5 BLACKWELL_MOE_ITERATIONS=20 \
+  ./tools/run_b200_tirx_suite.sh results/b200-tirx-smoke
 ```
 
-That produces the controlled experiment needed later: compare static versus
-dynamic scheduling under uniform, heavy-hitter, and Zipf routing while sweeping
-only `claim_size` in `{1, 2, 4, 8}`.
+After the smoke suite passes, rerun with the default 20 warmups and 200 timed
+iterations. The script archives environment data, generated CUDA, correctness
+logs and one combined CSV. Each case has a 600-second safety timeout; override
+it with `BLACKWELL_MOE_CASE_TIMEOUT` if compilation on the machine is slower.
 
-## Upstream reference
+## Measurement contract
 
-The warp-specialized pipeline is adapted from Step 7 of the Apache-2.0 licensed
-MLC tutorial, [*Modern GPU Programming for
-MLSys*](https://mlc.ai/modern-gpu-programming-for-mlsys/zh/chapter_gemm_advanced/index.html).
-The MoE tensor interface, work-list contract, padding policy, benchmark harness,
-and subsequent scheduler experiments are owned by this project.
+CSV latency includes the selected GPU kernel and its in-kernel acquisition
+overhead. Queue initialization occurs before the CUDA start event and is
+therefore excluded; this is stated explicitly so an end-to-end dispatch study
+can measure it separately. Report median, p95, effective logical TFLOP/s and
+useful-work ratio for every routing distribution. V3 must sweep claim sizes
+`1,2,4,8`.
+
+The CSV also records `CV(M)`, maximum-over-mean M, inactive and small-M expert
+ratios, expert-tile CV, maximum-over-mean expert tile count, and tiles per CTA.
+These are the inputs used to fit the launch-level crossover model.
+
+## Host launch dispatch
+
+`python/blackwell_moe_tirx/dispatch.py` computes routing features without TVM
+or CUDA and exposes `select_kernel`. The CLI accepts `--kernel=auto`, but its
+current thresholds are bootstrap rules only. V5 is deliberately excluded from
+automatic selection until the B200 matrix establishes whether and where CLC
+beats the atomic and static paths.
+
+## Upstream attribution
+
+The warp-specialized math pipeline is adapted from Step 7 of the Apache-2.0
+licensed MLC tutorial, *Modern GPU Programming for MLSys*. The MoE tensor
+interface, expert worklist, atomic mailbox protocol, adaptive coarse/fine queue,
+benchmark matrix and dispatch study are project-owned. V5 uses Apache TVM's
+`ClusterLaunchControlScheduler` abstraction.

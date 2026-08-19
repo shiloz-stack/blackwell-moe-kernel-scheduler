@@ -1,5 +1,7 @@
 build/
+build-*/
 cmake-build-*/
+.venv*/
 .cache/
 .DS_Store
 __pycache__/
@@ -11,4 +13,4 @@ __pycache__/
 *.csv
 results/*
 !results/.gitkeep
-
+tmp/
