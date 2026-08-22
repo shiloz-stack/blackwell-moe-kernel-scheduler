@@ -19,7 +19,15 @@ from tvm.script import tirx as T
 from tvm.script.tirx import tile as Tx
 from tvm.backend.cuda.tile_primitive.tma_utils import SwizzleMode, mma_shared_layout
 from tvm.tirx.lang.pipeline import MBarrier, PipelineState, TCGen05Bar, TMABar
-from tvm.tirx.layout import S, TCol, TLane, TileLayout, tid_in_wg
+from tvm.tirx.layout import (
+    S,
+    TCol,
+    TLane,
+    TileLayout,
+    tcgen05_atom_layout,
+    tid_in_wg,
+    tmem_datapath_layout,
+)
 
 from ..config import MoEWorkloadPlan, TIRxMoESpec
 
@@ -27,7 +35,12 @@ from ..config import MoEWorkloadPlan, TIRxMoESpec
 BF16_SIZE = 2
 
 
-def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
+def build_static_warp_specialized_kernel(
+    spec: TIRxMoESpec,
+    plan: MoEWorkloadPlan,
+    *,
+    small_m: bool = False,
+):
     """Return a specialized static-persistent TIRx PrimFunc.
 
     Tensor shapes and work-list length are compile-time constants.  The three
@@ -37,6 +50,11 @@ def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
     """
 
     spec.validate()
+    expected_tile_m = 64 if small_m else 128
+    if spec.tile_m != expected_tile_m or plan.tile_m != expected_tile_m:
+        raise ValueError(
+            f"this kernel specialization requires tile_m={expected_tile_m}"
+        )
     if len(plan.tokens_per_expert) != spec.experts:
         raise ValueError("plan and spec disagree on expert count")
     if not plan.tiles:
@@ -89,6 +107,16 @@ def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
         d_type,
         SwizzleMode.SWIZZLE_128B_ATOM,
         (BLK_M, BLK_N),
+    )
+    # tcgen05 M=128 uses the direct Layout-D row mapping.  M=64 uses
+    # Layout F, which scatters four groups of 16 logical rows across the four
+    # 32-lane TMEM regions.  The epilogue fragment must carry the matching
+    # .16x256b register layout when it reads the M=64 accumulator back.
+    tmem_layout = tmem_datapath_layout(
+        "F" if small_m else "D", BLK_M, 512
+    )
+    small_m_reg_layout = tcgen05_atom_layout(
+        "16x256b", (BLK_M, BLK_N), "float32"
     )
 
     @T.prim_func
@@ -163,11 +191,11 @@ def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
         T.cuda.cta_sync()
 
         tmem = T.decl_buffer(
-            (128, 512),
+            (BLK_M, 512),
             acc_type,
             scope="tmem",
             allocated_addr=tmem_addr[0],
-            layout=TileLayout(S[(128, 512) : (1 @ TLane, 1 @ TCol)]),
+            layout=tmem_layout,
         )
 
         # -----------------------------------------------------------------
@@ -275,12 +303,15 @@ def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
         # -----------------------------------------------------------------
         # 7. Epilogue / writeback (WG 0, all 128 threads)
         # -----------------------------------------------------------------
-        # One thread owns one output row.  The warpgroup drains FP32 TMEM into
-        # registers, casts to BF16, assembles a 128x128 D tile in SMEM, and lets
-        # one lane issue the final asynchronous TMA store to global memory.
+        # The warpgroup drains FP32 TMEM into registers, casts to BF16,
+        # assembles D in SMEM, and lets one lane issue the final TMA store.
+        # M=128 maps one row to each thread.  M=64 instead uses Layout F and a
+        # layout-aware register-to-SMEM deposit because its rows are scattered
+        # across half of every 32-lane TMEM partition.
         elif wg_id == 0:
             wb_ps = PipelineState(1, phase=0)
-            reg_bf16 = T.alloc_local((BLK_N,), d_type)
+            if not small_m:
+                reg_bf16 = T.alloc_local((BLK_N,), d_type)
             tile_id: T.int32 = bx
             while tile_id < TILE_COUNT:
                 expert_id = T.meta_var(WorkTiles[tile_id, 0])
@@ -291,22 +322,42 @@ def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
                 wb_ps.advance()
                 T.ptx.tcgen05.fence.after_thread_sync()
 
-                reg = T.alloc_local((BLK_N,), acc_type)
-                reg_wg = reg.view(
-                    128,
-                    BLK_N,
-                    layout=TileLayout(S[(128, BLK_N) : (1 @ tid_in_wg, 1)]),
-                )
-                # TMEM -> per-thread registers.  tcgen05.wait.ld is required
-                # before the registers can be read by the cast.
-                Tx.wg.copy_async(reg_wg[:], tmem[:, :BLK_N])
-                T.ptx.tcgen05.wait.ld()
-                # All 128 threads have copied their row, so the next MMA tile
-                # may safely reuse the same TMEM accumulator columns.
-                ld2mma.arrive(0)
-
-                Tx.cast(reg_bf16[:], reg[:])
-                Tx.copy(Dsmem[warp_id * 32 + lane_id, :], reg_bf16[:])
+                if small_m:
+                    reg = T.alloc_buffer(
+                        (BLK_M, BLK_N),
+                        acc_type,
+                        scope="local",
+                        layout=small_m_reg_layout,
+                    )
+                    reg_bf16_small = T.alloc_buffer(
+                        (BLK_M, BLK_N),
+                        d_type,
+                        scope="local",
+                        layout=small_m_reg_layout,
+                    )
+                    Tx.wg.copy_async(reg[:, :], tmem[:, :BLK_N])
+                    T.ptx.tcgen05.wait.ld()
+                    ld2mma.arrive(0)
+                    Tx.wg.cast(reg_bf16_small[:, :], reg[:, :])
+                    Tx.wg.copy(Dsmem[:, :], reg_bf16_small[:, :])
+                else:
+                    reg = T.alloc_local((BLK_N,), acc_type)
+                    reg_wg = reg.view(
+                        128,
+                        BLK_N,
+                        layout=TileLayout(
+                            S[(128, BLK_N) : (1 @ tid_in_wg, 1)]
+                        ),
+                    )
+                    # TMEM -> per-thread registers. tcgen05.wait.ld is
+                    # required before the registers can be read by the cast.
+                    Tx.wg.copy_async(reg_wg[:], tmem[:, :BLK_N])
+                    T.ptx.tcgen05.wait.ld()
+                    ld2mma.arrive(0)
+                    Tx.cast(reg_bf16[:], reg[:])
+                    Tx.copy(
+                        Dsmem[warp_id * 32 + lane_id, :], reg_bf16[:]
+                    )
                 # Publish all register -> SMEM writes before lane 0 launches
                 # the shared -> global TMA store.
                 T.ptx.fence.proxy_async("shared::cta")
@@ -341,6 +392,12 @@ def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
                 T.ptx.tcgen05.dealloc(tmem_addr[0], n_cols=512, cta_group=1)
 
     return kernel
+
+
+def build_kernel(spec: TIRxMoESpec, plan: MoEWorkloadPlan):
+    """Build the validated M=128 V1 path."""
+
+    return build_static_warp_specialized_kernel(spec, plan, small_m=False)
 
 
 def compile_static_persistent_moe(

@@ -6,6 +6,7 @@ import unittest
 
 from blackwell_moe_tirx.config import (
     TIRxMoESpec,
+    build_padding_aware_plans,
     build_workload_plan,
     chunked_claims,
     hybrid_claims,
@@ -50,9 +51,53 @@ class TIRxWorklistTest(unittest.TestCase):
             [[0, 0, 0], [0, 0, 1], [1, 0, 0], [1, 0, 1]],
         )
 
-    def test_shape_contract_rejects_unsupported_tiles(self) -> None:
-        with self.assertRaisesRegex(ValueError, "128x128x64"):
-            TIRxMoESpec(tile_m=64).validate()
+    def test_shape_contract_accepts_layout_d_and_layout_f_tiles(self) -> None:
+        TIRxMoESpec(tile_m=128).validate()
+        TIRxMoESpec(tile_m=64).validate()
+        with self.assertRaisesRegex(ValueError, "64x128x64 and 128x128x64"):
+            TIRxMoESpec(tile_m=32).validate()
+
+    def test_m64_worklist_uses_64_row_indices(self) -> None:
+        spec = TIRxMoESpec(
+            experts=1, tokens=129, n=128, k=64, tile_m=64
+        )
+        plan = build_workload_plan(spec, token_counts=(129,))
+        self.assertEqual(
+            plan.device_worklist(),
+            [[0, 0, 0], [0, 1, 0], [0, 2, 0]],
+        )
+
+    def test_padding_aware_buckets_cover_rows_once_and_reduce_padding(self) -> None:
+        spec = TIRxMoESpec(experts=4, tokens=450, n=256, k=64)
+        bucketed = build_padding_aware_plans(
+            spec, token_counts=(0, 63, 130, 257)
+        )
+
+        self.assertEqual(bucketed.large.tile_m, 128)
+        self.assertEqual(bucketed.small.tile_m, 64)
+        self.assertEqual(bucketed.large.m_capacity, bucketed.small.m_capacity)
+        self.assertEqual(
+            bucketed.logical_flops,
+            2 * spec.tokens * spec.n * spec.k,
+        )
+        self.assertGreater(bucketed.padding_reduction, 0.0)
+
+        covered: dict[tuple[int, int], int] = {}
+        for plan in (bucketed.large, bucketed.small):
+            for tile in plan.tiles:
+                if tile.tile_n == 0:
+                    key = (tile.expert_id, tile.tile_m)
+                    self.assertNotIn(key, covered)
+                    covered[key] = tile.valid_m
+        for expert_id, count in enumerate((0, 63, 130, 257)):
+            self.assertEqual(
+                sum(
+                    valid
+                    for (owner, _offset), valid in covered.items()
+                    if owner == expert_id
+                ),
+                count,
+            )
 
     def test_static_persistent_mapping_is_exactly_once(self) -> None:
         assignments = static_cta_assignments(tile_count=353, cta_count=148)
@@ -88,6 +133,7 @@ class TIRxWorklistTest(unittest.TestCase):
                 "v3_chunked",
                 "v4_hybrid",
                 "v5_clc",
+                "v6_small_m_ws",
             ),
         )
 
@@ -104,6 +150,7 @@ class TIRxWorklistTest(unittest.TestCase):
         )
         self.assertTrue(get_descriptor("v2_dynamic").requires_queue)
         self.assertFalse(get_descriptor("v5_clc").requires_queue)
+        self.assertEqual(get_descriptor("v6_small_m_ws").tile_m, 64)
 
         hybrid_spec = TIRxMoESpec(
             experts=4,

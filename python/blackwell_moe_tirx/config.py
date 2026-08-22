@@ -8,7 +8,7 @@ unit-testable on any machine.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import random
 from typing import Literal, Sequence
@@ -46,8 +46,10 @@ class TIRxMoESpec:
             raise ValueError("n must be divisible by tile_n in the current TIRx family")
         if self.k % self.tile_k:
             raise ValueError("k must be divisible by tile_k in the current TIRx family")
-        if (self.tile_m, self.tile_n, self.tile_k) != (128, 128, 64):
-            raise ValueError("the current tcgen05 family supports only a 128x128x64 CTA tile")
+        if self.tile_m not in (64, 128) or (self.tile_n, self.tile_k) != (128, 64):
+            raise ValueError(
+                "the current tcgen05 family supports 64x128x64 and 128x128x64 CTA tiles"
+            )
         if self.cta_count <= 0:
             raise ValueError("cta_count must be positive")
         if self.pipe_depth != 2:
@@ -82,6 +84,8 @@ class MoEWorkloadPlan:
     m_capacity: int
     logical_flops: int
     padded_flops: int
+    tile_m: int
+    tile_n: int
 
     @property
     def active_experts(self) -> int:
@@ -98,11 +102,47 @@ class MoEWorkloadPlan:
         proof needed by TIRx's runtime-coordinate TMA dispatcher.
         """
 
-        # The first kernel contract fixes both M and N tile extents at 128.
         return [
-            [tile.expert_id, tile.tile_m // 128, tile.tile_n // 128]
+            [
+                tile.expert_id,
+                tile.tile_m // self.tile_m,
+                tile.tile_n // self.tile_n,
+            ]
             for tile in self.tiles
         ]
+
+
+@dataclass(frozen=True)
+class BucketedMoEWorkloadPlan:
+    """Two launch plans that replace 128-row padding with a 64-row tail path."""
+
+    large_spec: TIRxMoESpec
+    small_spec: TIRxMoESpec
+    large: MoEWorkloadPlan
+    small: MoEWorkloadPlan
+    baseline_padded_flops: int
+
+    @property
+    def logical_flops(self) -> int:
+        return self.large.logical_flops + self.small.logical_flops
+
+    @property
+    def padded_flops(self) -> int:
+        return self.large.padded_flops + self.small.padded_flops
+
+    @property
+    def useful_work_ratio(self) -> float:
+        return 1.0 if self.padded_flops == 0 else self.logical_flops / self.padded_flops
+
+    @property
+    def padding_reduction(self) -> float:
+        if self.baseline_padded_flops == 0:
+            return 0.0
+        return 1.0 - self.padded_flops / self.baseline_padded_flops
+
+    @property
+    def launch_count(self) -> int:
+        return int(bool(self.large.tiles)) + int(bool(self.small.tiles))
 
 
 def _weights(
@@ -216,6 +256,119 @@ def build_workload_plan(
         m_capacity=m_capacity,
         logical_flops=logical_flops,
         padded_flops=padded_flops,
+        tile_m=spec.tile_m,
+        tile_n=spec.tile_n,
+    )
+
+
+def _build_plan_from_tiles(
+    spec: TIRxMoESpec,
+    distribution: Distribution,
+    seed: int,
+    counts: tuple[int, ...],
+    tiles: list[WorkTile],
+    m_capacity: int,
+) -> MoEWorkloadPlan:
+    """Construct one bucket while charging FLOPs only to its scheduled rows."""
+
+    logical_flops = sum(
+        2 * tile.valid_m * tile.valid_n * spec.k for tile in tiles
+    )
+    padded_flops = len(tiles) * 2 * spec.tile_m * spec.tile_n * spec.k
+    return MoEWorkloadPlan(
+        distribution=distribution,
+        seed=seed,
+        tokens_per_expert=counts,
+        tiles=tuple(tiles),
+        m_capacity=m_capacity,
+        logical_flops=logical_flops,
+        padded_flops=padded_flops,
+        tile_m=spec.tile_m,
+        tile_n=spec.tile_n,
+    )
+
+
+def build_padding_aware_plans(
+    spec: TIRxMoESpec,
+    distribution: Distribution = "uniform",
+    *,
+    seed: int = 2026,
+    token_counts: Sequence[int] | None = None,
+) -> BucketedMoEWorkloadPlan:
+    """Split expert rows into an M=128 main bucket and an M=64 tail bucket.
+
+    Full 128-row regions always use the large kernel.  A final 1--64 row
+    region uses Layout-F M=64, while a 65--127 row region remains one M=128
+    tile because two M=64 MMAs would perform the same padded arithmetic and
+    create more scheduling work.
+    """
+
+    large_spec = replace(spec, tile_m=128)
+    small_spec = replace(spec, tile_m=64)
+    large_spec.validate()
+    small_spec.validate()
+    counts = (
+        generate_token_counts(large_spec, distribution, seed=seed)
+        if token_counts is None
+        else tuple(int(count) for count in token_counts)
+    )
+    if len(counts) != spec.experts:
+        raise ValueError("token_counts length must equal experts")
+    if any(count < 0 for count in counts):
+        raise ValueError("token counts must be non-negative")
+    if sum(counts) != spec.tokens:
+        raise ValueError("token counts must sum to spec.tokens")
+
+    max_m = max(counts, default=0)
+    m_capacity = max(128, math.ceil(max_m / 128) * 128)
+    large_tiles: list[WorkTile] = []
+    small_tiles: list[WorkTile] = []
+    for expert_id, expert_m in enumerate(counts):
+        full_blocks, remainder = divmod(expert_m, 128)
+        large_rows = full_blocks + int(remainder > 64)
+        for m_index in range(large_rows):
+            tile_m = m_index * 128
+            valid_m = min(128, expert_m - tile_m)
+            for tile_n in range(0, spec.n, spec.tile_n):
+                large_tiles.append(
+                    WorkTile(
+                        expert_id=expert_id,
+                        tile_m=tile_m,
+                        tile_n=tile_n,
+                        valid_m=valid_m,
+                        valid_n=min(spec.tile_n, spec.n - tile_n),
+                    )
+                )
+        if 0 < remainder <= 64:
+            tile_m = full_blocks * 128
+            for tile_n in range(0, spec.n, spec.tile_n):
+                small_tiles.append(
+                    WorkTile(
+                        expert_id=expert_id,
+                        tile_m=tile_m,
+                        tile_n=tile_n,
+                        valid_m=remainder,
+                        valid_n=min(spec.tile_n, spec.n - tile_n),
+                    )
+                )
+
+    large = _build_plan_from_tiles(
+        large_spec, distribution, seed, counts, large_tiles, m_capacity
+    )
+    small = _build_plan_from_tiles(
+        small_spec, distribution, seed, counts, small_tiles, m_capacity
+    )
+    baseline = build_workload_plan(
+        large_spec, distribution, seed=seed, token_counts=counts
+    )
+    if large.logical_flops + small.logical_flops != baseline.logical_flops:
+        raise AssertionError("padding-aware buckets must cover every logical output once")
+    return BucketedMoEWorkloadPlan(
+        large_spec=large_spec,
+        small_spec=small_spec,
+        large=large,
+        small=small,
+        baseline_padded_flops=baseline.padded_flops,
     )
 
 

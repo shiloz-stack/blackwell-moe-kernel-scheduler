@@ -23,8 +23,13 @@ class KernelDescriptor:
     acquisition: str
     requires_queue: bool = False
     requires_clc: bool = False
+    tile_m: int = 128
 
     def build(self, spec: TIRxMoESpec, plan: MoEWorkloadPlan):
+        if spec.tile_m != self.tile_m or plan.tile_m != self.tile_m:
+            raise ValueError(
+                f"{self.name} requires tile_m={self.tile_m}, got {spec.tile_m}"
+            )
         builder: Callable = getattr(import_module(self.module), "build_kernel")
         return builder(spec, plan)
 
@@ -102,6 +107,15 @@ KERNEL_VERSIONS: dict[str, KernelDescriptor] = {
         warp_specialized=True,
         acquisition="Blackwell Cluster Launch Control",
         requires_clc=True,
+    ),
+    "v6_small_m_ws": KernelDescriptor(
+        name="v6_small_m_ws",
+        module="blackwell_moe_tirx.kernels.v6_small_m_ws",
+        implementation="tirx_v6_small_m64_static_persistent_ws",
+        persistent=True,
+        warp_specialized=True,
+        acquisition="static grid stride; M64 Layout-F tail",
+        tile_m=64,
     ),
 }
 
