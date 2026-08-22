@@ -8,7 +8,12 @@ from pathlib import Path
 import statistics
 from typing import Any
 
-from .config import MoEWorkloadPlan, TIRxMoESpec
+from .config import (
+    BucketedMoEWorkloadPlan,
+    MoEWorkloadPlan,
+    TIRxMoESpec,
+    build_workload_plan,
+)
 from .dispatch import routing_features
 
 
@@ -23,6 +28,11 @@ class BenchmarkResult:
     tokens: int
     n: int
     k: int
+    tile_m_path: str
+    kernel_launches: int
+    large_tiles: int
+    small_tiles: int
+    padding_reduction: float
     tiles: int
     ctas: int
     pipe_depth: int
@@ -47,7 +57,8 @@ class BenchmarkResult:
     def csv_header() -> str:
         return (
             "device,implementation,acquisition,distribution,experts,active_experts,tokens,"
-            "n,k,tiles,ctas,pipe_depth,claim_size,hybrid_main_claim_size,"
+            "n,k,tile_m_path,kernel_launches,large_tiles,small_tiles,"
+            "padding_reduction,tiles,ctas,pipe_depth,claim_size,hybrid_main_claim_size,"
             "hybrid_tail_tiles,cv_m,max_over_mean_m,inactive_expert_ratio,"
             "small_m_expert_ratio,expert_tile_cv,max_expert_tiles_over_mean,"
             "tiles_per_cta,useful_work_ratio,median_ms,p95_ms,"
@@ -65,6 +76,11 @@ class BenchmarkResult:
             self.tokens,
             self.n,
             self.k,
+            self.tile_m_path,
+            self.kernel_launches,
+            self.large_tiles,
+            self.small_tiles,
+            f"{self.padding_reduction:.6f}",
             self.tiles,
             self.ctas,
             self.pipe_depth,
@@ -124,6 +140,24 @@ def _module_cuda_source(executable: Any) -> str:
             imports = getattr(module, "imported_modules", ())
         modules.extend(imports)
     raise RuntimeError("compiled module did not expose generated CUDA source")
+
+
+def _compile_kernel(
+    tvm: Any,
+    spec: TIRxMoESpec,
+    plan: MoEWorkloadPlan,
+    version: str,
+) -> tuple[Any, Any]:
+    from .kernels.registry import get_descriptor
+
+    descriptor = get_descriptor(version)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    kernel = descriptor.build(spec, plan)
+    with target:
+        executable = tvm.compile(
+            tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx"
+        )
+    return descriptor, executable
 
 
 def _percentile_95(values: list[float]) -> float:
@@ -246,16 +280,8 @@ def run_benchmark(
     if warmup < 0 or iterations <= 0:
         raise ValueError("warmup must be non-negative and iterations must be positive")
     torch, tvm = _require_runtime()
-    from .kernels.registry import get_descriptor
-
     torch.backends.cuda.matmul.allow_tf32 = False
-    descriptor = get_descriptor(version)
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
-    kernel = descriptor.build(spec, plan)
-    with target:
-        executable = tvm.compile(
-            tvm.IRModule({"main": kernel}), target=target, tir_pipeline="tirx"
-        )
+    descriptor, executable = _compile_kernel(tvm, spec, plan, version)
 
     if dump_cuda is not None:
         dump_cuda.parent.mkdir(parents=True, exist_ok=True)
@@ -315,6 +341,11 @@ def run_benchmark(
         tokens=spec.tokens,
         n=spec.n,
         k=spec.k,
+        tile_m_path=str(spec.tile_m),
+        kernel_launches=1,
+        large_tiles=len(plan.tiles) if spec.tile_m == 128 else 0,
+        small_tiles=len(plan.tiles) if spec.tile_m == 64 else 0,
+        padding_reduction=0.0,
         tiles=len(plan.tiles),
         ctas=descriptor.launch_ctas(spec, plan),
         pipe_depth=spec.pipe_depth,
@@ -329,6 +360,139 @@ def run_benchmark(
         max_expert_tiles_over_mean=features.max_expert_tiles_over_mean,
         tiles_per_cta=features.tiles_per_cta,
         useful_work_ratio=plan.useful_work_ratio,
+        median_ms=median_ms,
+        p95_ms=p95_ms,
+        effective_tflops=effective_tflops,
+        max_abs_error=max_abs,
+        max_rel_error=max_rel,
+    )
+
+
+def run_padding_aware_benchmark(
+    bucketed: BucketedMoEWorkloadPlan,
+    *,
+    warmup: int = 20,
+    iterations: int = 200,
+    correctness_only: bool = False,
+    dump_cuda: Path | None = None,
+) -> BenchmarkResult:
+    """Benchmark the M=128 main bucket followed by the M=64 tail bucket."""
+
+    if warmup < 0 or iterations <= 0:
+        raise ValueError("warmup must be non-negative and iterations must be positive")
+    if bucketed.launch_count == 0:
+        raise ValueError("at least one routed token is required")
+    torch, tvm = _require_runtime()
+    torch.backends.cuda.matmul.allow_tf32 = False
+
+    component_specs = (
+        ("m128", "v1_static_ws", bucketed.large_spec, bucketed.large),
+        ("m64", "v6_small_m_ws", bucketed.small_spec, bucketed.small),
+    )
+    components: list[tuple[Any, Any, Any]] = []
+    for suffix, version, spec, plan in component_specs:
+        if not plan.tiles:
+            continue
+        descriptor, executable = _compile_kernel(tvm, spec, plan, version)
+        if dump_cuda is not None:
+            extension = dump_cuda.suffix or ".cu"
+            component_path = dump_cuda.with_name(
+                f"{dump_cuda.stem}_{suffix}{extension}"
+            )
+            component_path.parent.mkdir(parents=True, exist_ok=True)
+            component_path.write_text(
+                _module_cuda_source(executable), encoding="utf-8"
+            )
+        work_tiles = torch.tensor(
+            plan.device_worklist(), dtype=torch.int32, device="cuda"
+        )
+        components.append((descriptor, executable, work_tiles))
+
+    baseline_plan = build_workload_plan(
+        bucketed.large_spec,
+        bucketed.large.distribution,
+        seed=bucketed.large.seed,
+        token_counts=bucketed.large.tokens_per_expert,
+    )
+    A, B, _unused_work_tiles, D = _allocate_inputs(
+        torch, bucketed.large_spec, baseline_plan
+    )
+
+    def invoke_components() -> None:
+        for descriptor, executable, work_tiles in components:
+            _invoke(executable, descriptor, A, B, work_tiles, None, D)
+
+    D.zero_()
+    invoke_components()
+    torch.cuda.synchronize()
+    max_abs = 0.0
+    max_rel = 0.0
+    for expert_id, expert_m in enumerate(baseline_plan.tokens_per_expert):
+        if not expert_m:
+            continue
+        reference = (
+            A[expert_id, :expert_m, :].float()
+            @ B[expert_id].float().T
+        ).to(torch.bfloat16)
+        actual = D[expert_id, :expert_m, :]
+        difference = (actual.float() - reference.float()).abs()
+        denominator = reference.float().abs().clamp_min(1.0e-6)
+        max_abs = max(max_abs, float(difference.max().item()))
+        max_rel = max(
+            max_rel, float((difference / denominator).max().item())
+        )
+        torch.testing.assert_close(actual, reference, rtol=2.0e-2, atol=5.0e-2)
+
+    timings: list[float] = []
+    if not correctness_only:
+        for _ in range(warmup):
+            invoke_components()
+        torch.cuda.synchronize()
+        starts = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+        ends = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+        for start, end in zip(starts, ends):
+            start.record()
+            invoke_components()
+            end.record()
+        torch.cuda.synchronize()
+        timings = [start.elapsed_time(end) for start, end in zip(starts, ends)]
+
+    median_ms = statistics.median(timings) if timings else math.nan
+    p95_ms = _percentile_95(timings)
+    effective_tflops = (
+        bucketed.logical_flops / (median_ms * 1.0e9) if timings else math.nan
+    )
+    features = routing_features(bucketed.large_spec, baseline_plan)
+    return BenchmarkResult(
+        device=torch.cuda.get_device_name(),
+        implementation="tirx_v6_padding_aware_m128_m64_ws",
+        acquisition="host M128/M64 bucketing; static grid stride",
+        distribution=baseline_plan.distribution,
+        experts=bucketed.large_spec.experts,
+        active_experts=baseline_plan.active_experts,
+        tokens=bucketed.large_spec.tokens,
+        n=bucketed.large_spec.n,
+        k=bucketed.large_spec.k,
+        tile_m_path="128+64",
+        kernel_launches=bucketed.launch_count,
+        large_tiles=len(bucketed.large.tiles),
+        small_tiles=len(bucketed.small.tiles),
+        padding_reduction=bucketed.padding_reduction,
+        tiles=len(bucketed.large.tiles) + len(bucketed.small.tiles),
+        ctas=bucketed.large_spec.cta_count,
+        pipe_depth=bucketed.large_spec.pipe_depth,
+        claim_size=bucketed.large_spec.claim_size,
+        hybrid_main_claim_size=bucketed.large_spec.hybrid_main_claim_size,
+        hybrid_tail_tiles=bucketed.large_spec.hybrid_tail_tiles,
+        cv_m=features.cv_m,
+        max_over_mean_m=features.max_over_mean_m,
+        inactive_expert_ratio=features.inactive_expert_ratio,
+        small_m_expert_ratio=features.small_m_expert_ratio,
+        expert_tile_cv=features.expert_tile_cv,
+        max_expert_tiles_over_mean=features.max_expert_tiles_over_mean,
+        tiles_per_cta=(len(bucketed.large.tiles) + len(bucketed.small.tiles))
+        / bucketed.large_spec.cta_count,
+        useful_work_ratio=bucketed.useful_work_ratio,
         median_ms=median_ms,
         p95_ms=p95_ms,
         effective_tflops=effective_tflops,

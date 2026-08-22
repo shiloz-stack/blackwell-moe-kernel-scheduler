@@ -32,6 +32,7 @@ versions=(
   v3_chunked
   v4_hybrid
   v5_clc
+  v6_small_m_ws
 )
 
 : >"${results_dir}/correctness.log"
@@ -43,6 +44,12 @@ for version in "${versions[@]}"; do
     --dump-cuda="${results_dir}/generated/${version}.cu" \
     2>&1 | tee -a "${results_dir}/correctness.log"
 done
+run_checked python3 -m blackwell_moe_tirx.cli \
+  --kernel=v6_padding_aware \
+  --smoke \
+  --correctness-only \
+  --dump-cuda="${results_dir}/generated/v6_padding_aware.cu" \
+  2>&1 | tee -a "${results_dir}/correctness.log"
 
 append_csv() {
   local output="$1"
@@ -67,7 +74,9 @@ for distribution in uniform heavy_hitter sparse zipf; do
     v1_static_ws \
     v2_dynamic \
     v4_hybrid \
-    v5_clc; do
+    v5_clc \
+    v6_small_m_ws \
+    v6_padding_aware; do
     append_csv "${results_csv}" \
       python3 -m blackwell_moe_tirx.cli \
       --kernel="${version}" \

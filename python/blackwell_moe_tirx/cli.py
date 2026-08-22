@@ -5,10 +5,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .config import TIRxMoESpec, build_workload_plan
+from .config import (
+    TIRxMoESpec,
+    build_padding_aware_plans,
+    build_workload_plan,
+)
 from .dispatch import routing_features, select_kernel
 from .kernels import list_versions
-from .runner import BenchmarkResult, run_benchmark
+from .runner import (
+    BenchmarkResult,
+    run_benchmark,
+    run_padding_aware_benchmark,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -16,7 +24,9 @@ def _parser() -> argparse.ArgumentParser:
         description="Compile and benchmark a versioned TIRx MoE kernel on B200"
     )
     parser.add_argument(
-        "--kernel", choices=("auto", *list_versions()), default="v1_static_ws"
+        "--kernel",
+        choices=("auto", "v6_padding_aware", *list_versions()),
+        default="v1_static_ws",
     )
     parser.add_argument(
         "--distribution",
@@ -62,6 +72,7 @@ def main() -> None:
         args.warmup = min(args.warmup, 5)
         args.iterations = min(args.iterations, 20)
 
+    tile_m = 64 if args.kernel == "v6_small_m_ws" else 128
     spec = TIRxMoESpec(
         experts=args.experts,
         tokens=args.tokens,
@@ -72,18 +83,40 @@ def main() -> None:
         claim_size=args.claim_size,
         hybrid_main_claim_size=args.hybrid_main_claim_size,
         hybrid_tail_tiles=args.hybrid_tail_tiles,
+        tile_m=tile_m,
     )
-    plan = build_workload_plan(spec, args.distribution, seed=args.seed)
-    selected_kernel = select_kernel(spec, plan) if args.kernel == "auto" else args.kernel
-    result = run_benchmark(
-        spec,
-        plan,
-        version=selected_kernel,
-        warmup=args.warmup,
-        iterations=args.iterations,
-        correctness_only=args.correctness_only,
-        dump_cuda=args.dump_cuda,
-    )
+    if args.kernel == "v6_padding_aware":
+        bucketed = build_padding_aware_plans(
+            spec, args.distribution, seed=args.seed
+        )
+        plan = build_workload_plan(
+            bucketed.large_spec,
+            args.distribution,
+            seed=args.seed,
+            token_counts=bucketed.large.tokens_per_expert,
+        )
+        selected_kernel = args.kernel
+        result = run_padding_aware_benchmark(
+            bucketed,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            correctness_only=args.correctness_only,
+            dump_cuda=args.dump_cuda,
+        )
+    else:
+        plan = build_workload_plan(spec, args.distribution, seed=args.seed)
+        selected_kernel = (
+            select_kernel(spec, plan) if args.kernel == "auto" else args.kernel
+        )
+        result = run_benchmark(
+            spec,
+            plan,
+            version=selected_kernel,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            correctness_only=args.correctness_only,
+            dump_cuda=args.dump_cuda,
+        )
 
     if args.csv:
         print(BenchmarkResult.csv_header())
@@ -94,6 +127,7 @@ def main() -> None:
             f"TIRx BF16 MoE correctness passed on {result.device}: "
             f"kernel={selected_kernel}, "
             f"active_experts={result.active_experts}, tiles={result.tiles}, "
+            f"tile_m_path={result.tile_m_path}, "
             f"max_abs_error={result.max_abs_error:.6g}, "
             f"max_rel_error={result.max_rel_error:.6g}"
         )
@@ -101,7 +135,8 @@ def main() -> None:
             print(
                 f"median={result.median_ms:.6f} ms, p95={result.p95_ms:.6f} ms, "
                 f"effective={result.effective_tflops:.3f} TFLOP/s, "
-                f"useful_work_ratio={result.useful_work_ratio:.3%}"
+                f"useful_work_ratio={result.useful_work_ratio:.3%}, "
+                f"padding_reduction={result.padding_reduction:.3%}"
             )
         if args.kernel == "auto":
             print(
