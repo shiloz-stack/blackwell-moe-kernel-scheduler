@@ -62,6 +62,25 @@ correctness or speed until the complete B200 optimization suite is archived.
 then integrate the project-owned ExpertTile acquisition loop with a validated
 GEMM pipeline.
 
+## T3 — Padding-aware Layout-F tail path
+
+**Hypothesis.** Once equal-cost ExpertTiles are flattened across persistent
+CTAs, routing skew is dominated by per-expert M=128 padding rather than SM tail
+imbalance. A second M=64 tcgen05 path should recover useful Tensor Core work.
+
+**Implementation.** V6 splits each expert into an M=128 main bucket and, only
+when the final remainder is 1--64 rows, an M=64 Layout-F tail bucket. A
+65--127-row remainder stays on V1 because two M=64 tiles perform the same
+padded arithmetic with more scheduling work. Both launches share A/B/D and are
+timed inside one CUDA Event interval.
+
+**Predicted work reduction.** For the fixed 64-expert/4096-token workloads,
+the planner reduces padded FLOPs by 27.3% uniform, 33.5% heavy-hitter, 16.0%
+sparse, and 35.4% Zipf. These are planner facts, not latency claims.
+
+**Next gate.** Compile both Layout-F smoke sources on B200, pass standalone and
+composite correctness, then compare V1, all-M=64, and bucketed V6 median/p95.
+
 ## Entry template
 
 ```text

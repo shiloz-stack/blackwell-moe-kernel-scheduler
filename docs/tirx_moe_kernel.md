@@ -11,12 +11,12 @@ The host planner compacts inactive experts and creates an expert-major list:
 (expert_id, tile_m_index, tile_n_index)
 ```
 
-The kernel multiplies the indices by 128 before forming TMA coordinates; this
-keeps their alignment provable even though the metadata is loaded at runtime.
-Every version computes the same BF16 `128x128x64` work tile with FP32
-accumulation. A is zero padded to 128 rows, so only valid routed rows enter the
-logical-FLOP and correctness metrics. Keeping the worklist, math tile and
-epilogue fixed makes scheduler comparisons causal.
+Each kernel multiplies the indices by its compile-time M/N tile size before
+forming TMA coordinates; this keeps their alignment provable even though the
+metadata is loaded at runtime. V0-V5 compute BF16 `128x128x64` work tiles.
+V6 adds a BF16 `64x128x64` tcgen05 Layout-F tail path and combines it with V1
+through two host-built buckets. Only valid routed rows enter logical-FLOP and
+correctness metrics.
 
 ## Optimization journey
 
@@ -29,6 +29,7 @@ epilogue fixed makes scheduler comparisons causal.
 | V3 | Persistent | Yes | Atomic chunk queue |
 | V4 | Persistent | Yes | Coarse expert-major chunks plus claim-1 tail |
 | V5 | CLC workers | Yes | Blackwell Cluster Launch Control |
+| V6 | Persistent, two launches | Yes | Host M=128 main / M=64 tail buckets |
 
 V0 and V0.5 retain TMA double buffering, tcgen05, TMEM and the TMA epilogue.
 They remove only warp specialization and/or persistent execution.
@@ -58,16 +59,21 @@ coordinate while a CLC request attempts to cancel a pending CTA launch. On
 success, the resident CTA inherits that coordinate as its next work item. It
 uses TIRx `ClusterLaunchControlScheduler`; it is not an emulated atomic queue.
 
+V6 keeps complete 128-row regions and 65--127 row tails on the validated V1
+path. A final 1--64 row expert tail is moved to a separate M=64 worklist. Its
+tcgen05 accumulator uses TMEM Layout F and a matching `.16x256b` register
+fragment for the TMEM-to-SMEM epilogue. Both kernels share A/B/D, and CUDA
+Event timing covers both launches. This removes half-tile padding without
+forcing large experts to use twice as many M=64 work items.
+
 ## Evidence boundary
 
 CPU tests cover worklist compaction, exact-once static/chunked/hybrid planning,
-version metadata and queue initialization. All seven sources pass the Apache
-TVM 0.26 TIRx parser and full SM100a lowering for smoke and production shapes
-across all four routing distributions. Generated source contains TMA and
-tcgen05 in every version, atomic acquisition in V2-V4, and CLC cancellation in
-V5. This machine has no Blackwell GPU, so numerical correctness, deadlock
-freedom and performance still require the B200 runtime gate. Do not claim a
-speedup until those measurements pass.
+M=64 indexing, disjoint bucket coverage, version metadata and queue
+initialization. V0-V5 have passed the B200 runtime gate. V6 remains a candidate
+until its Layout-F source compiles, both standalone and composite correctness
+checks pass, and the four-distribution B200 benchmark is archived. Do not claim
+a V6 speedup from its theoretical padding reduction alone.
 
 ## Environment
 
@@ -118,6 +124,16 @@ After the smoke suite passes, rerun with the default 20 warmups and 200 timed
 iterations. The script archives environment data, generated CUDA, correctness
 logs and one combined CSV. Each case has a 600-second safety timeout; override
 it with `BLACKWELL_MOE_CASE_TIMEOUT` if compilation on the machine is slower.
+
+For the focused V1 versus V6 experiment:
+
+```bash
+BLACKWELL_MOE_WARMUP=20 BLACKWELL_MOE_ITERATIONS=200 \
+  ./tools/run_b200_padding_suite.sh results/b200-padding-aware
+```
+
+The focused CSV contains V1, an all-M=64 ablation, and the production candidate
+that launches the M=128 main bucket followed by the M=64 tail bucket.
 
 ## Measurement contract
 

@@ -204,8 +204,8 @@ queue claim size under a bounded evaluation contract.
 The versioned implementations live in
 [`python/blackwell_moe_tirx/kernels`](python/blackwell_moe_tirx/kernels). They
 compile routed expert counts into `(expert_id, tile_m, tile_n)` work items and
-keep one BF16 `128x128x64` math pipeline fixed while changing execution and
-acquisition policy:
+use BF16 `128x128x64` and `64x128x64` Blackwell math paths while changing
+execution, acquisition, and padding policy:
 
 - double-buffered TMA operand movement;
 - FP32 `tcgen05` accumulation in Tensor Memory;
@@ -215,7 +215,8 @@ acquisition policy:
 
 The optimization sequence is V0 non-persistent, V0.5 persistent without warp
 specialization, V1 static warp-specialized, V2 dynamic claim-1, V3 chunked,
-V4 locality-aware coarse/fine, and V5 CLC. See
+V4 locality-aware coarse/fine, V5 CLC, and V6 padding-aware M=128/M=64
+bucketing with tcgen05 Layout F. See
 [`docs/tirx_moe_kernel.md`](docs/tirx_moe_kernel.md) for exact responsibility,
 evidence boundaries, and B200 commands.
 
@@ -300,9 +301,10 @@ See [`docs/sm100_native_dense.md`](docs/sm100_native_dense.md).
 - [x] V2/V3 atomic acquisition with one scheduler and a shared work mailbox
 - [x] V4 coarse expert-major main queue plus claim-1 tail queue
 - [x] V5 native TIRx Cluster Launch Control scheduler
+- [x] V6 Layout-F M=64 tail kernel and padding-aware M=128/M=64 bucketing
 - [x] Unified version-selecting correctness/generated-CUDA/median/p95 harness
 
-Run the active V0-V5 TIRx correctness and performance matrix with
+Run the active V0-V6 TIRx correctness and performance matrix with
 [`tools/run_b200_tirx_suite.sh`](tools/run_b200_tirx_suite.sh). The older CuTe
 reference and scheduler-probe matrix remains available through
 [`tools/run_b200_optimization_suite.sh`](tools/run_b200_optimization_suite.sh)
