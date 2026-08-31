@@ -1,11 +1,11 @@
 # Workload-Aware MoE Kernels on NVIDIA Blackwell
 
 <div align="center">
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![CUDA 12.8+](https://img.shields.io/badge/CUDA-12.8+-76B900.svg?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
-[![TIRx / TVM 0.26](https://img.shields.io/badge/TIRx%20%2F%20TVM-0.26-FF6F00.svg)](requirements-tirx.txt)
-[![GPU: NVIDIA B200](https://img.shields.io/badge/GPU-NVIDIA%20B200-111111.svg?logo=nvidia&logoColor=76B900)](#b200-results)
-[![B200 Correctness](https://img.shields.io/badge/B200%20correctness-passed-2EA44F.svg)](#measurement-boundary)
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?logo=python&amp;logoColor=white" alt="Python 3.10+"/></a>
+<a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/CUDA-12.8+-76B900.svg?logo=nvidia&amp;logoColor=white" alt="CUDA 12.8+"/></a>
+<a href="requirements-tirx.txt"><img src="https://img.shields.io/badge/TIRx%20%2F%20TVM-0.26-FF6F00.svg" alt="TIRx / TVM 0.26"/></a>
+<a href="#b200-results"><img src="https://img.shields.io/badge/GPU-NVIDIA%20B200-111111.svg?logo=nvidia&amp;logoColor=76B900" alt="GPU: NVIDIA B200"/></a>
+<a href="#measurement-boundary"><img src="https://img.shields.io/badge/B200%20correctness-passed-2EA44F.svg" alt="B200 correctness passed"/></a>
 </div>
 
 A kernel-level study of how **execution policy, expert-tile scheduling, and tile
