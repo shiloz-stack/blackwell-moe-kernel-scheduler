@@ -1,312 +1,257 @@
-# Blackwell MoE Kernel Scheduler
+# Workload-Aware MoE Kernels on NVIDIA Blackwell
 
-A kernel-level exploration of **persistent expert-tile scheduling** and **workload-aware dispatch** for irregular Mixture-of-Experts (MoE) inference on NVIDIA Blackwell GPUs.
+A kernel-level study of how **execution policy, expert-tile scheduling, and tile
+shape interact with irregular MoE routing workloads** on NVIDIA B200 GPUs.
 
-> **Status:** Work in progress. Seven project-owned TIRx versions now span a
-> non-persistent double-buffered kernel, static/dynamic/chunked/hybrid
-> persistent scheduling, warp specialization, and Blackwell CLC. All seven pass
-> TVM 0.26 SM100a lowering and await the ordered B200 numerical/deadlock/
-> performance gate. The previously validated
-> CUTLASS BF16 grouped GEMM is retained only as an optional external baseline.
+The project implements BF16 grouped GEMM kernels in TIRx on the Blackwell
+`TMA -> tcgen05 -> TMEM` path. Rather than searching for one universal winner,
+it measures where persistent execution, warp specialization, dynamic work
+acquisition, CLC, and padding-aware tile selection help or hurt.
 
-## Motivation
+> **Status:** Nine project-owned kernel/policy candidates have passed their
+> corresponding B200 correctness gates. The completed study contains 52 B200
+> benchmark cases and 10,400 timed CUDA Event samples across uniform,
+> heavy-hitter, sparse, and Zipf routing workloads. V1 reduced median kernel
+> latency by **6.3-7.6%** versus non-persistent V0; later experiments exposed
+> workload-dependent crossovers rather than a single best policy.
 
-MoE inference routes a different number of tokens to each expert. The resulting grouped GEMMs therefore contain many irregular and often small-`M` problems:
+## Why this problem matters
 
-- popular experts receive many tokens while others receive few or none;
-- static expert ordering can leave CTAs with uneven amounts of work;
-- small expert matrices may not provide enough parallelism to occupy the GPU;
-- scheduling overhead can outweigh useful computation in low-token regimes.
+After MoE routing, expert `i` receives `M_i` tokens and executes a different
+GEMM:
 
-This project focuses on **scheduling inside the GPU kernel**. It does not implement a full inference engine or replace the model-level router. The inference engine supplies routed token counts; the kernel scheduler decides how expert output tiles are assigned to persistent CTAs.
+```text
+Expert i:  [M_i, K] x [K, N] -> [M_i, N]
+```
 
-## Project Goal
+The total token count may stay fixed while the distribution changes
+substantially. Heavy-hitter and Zipf routing create many irregular small-`M`
+experts; sparse routing leaves some experts inactive. These patterns change:
 
-Build and evaluate a grouped-GEMM prototype that represents work as:
+- the number of output tiles per expert;
+- padding and useful-work ratio;
+- the amount of work available to each CTA;
+- the tradeoff between load balance and scheduling overhead.
+
+This repository studies that tradeoff **inside the grouped-GEMM kernel**. The
+model router, token permutation, NCCL expert-parallel communication, and full
+inference-engine integration are outside the measured boundary.
+
+## Kernel design
+
+Each routed grouped GEMM is flattened into independent work items:
 
 ```text
 (expert_id, tile_m, tile_n)
 ```
 
-and compares several expert-tile scheduling policies under realistic routing imbalance:
+Every project-owned kernel uses the same core Blackwell data path:
 
-1. baseline expert-order scheduling;
-2. tile-count-aware static persistent assignment;
-3. dynamic global work distribution;
-4. active-expert compaction for sparse and small-`M` workloads;
-5. workload-aware dispatch between scheduling policies.
+```text
+GMEM --TMA--> SMEM --tcgen05.mma--> TMEM
+                                      |
+                                      v
+                         registers -> SMEM --TMA--> GMEM
+```
 
-The end goal is not a single hand-tuned kernel for one shape. It is a reproducible study of **when each scheduling strategy wins, why it wins, and what overhead it introduces**.
+The versions vary one primary execution or scheduling decision at a time:
 
-## Design
-
-### 1. Routing-aware workload model
-
-Synthetic and trace-driven workloads will be characterized using:
-
-- coefficient of variation of expert token counts, `CV(M)`;
-- `max(M) / mean(M)`;
-- inactive-expert ratio;
-- small-`M` expert ratio;
-- expert tile-count imbalance.
-
-Initial workload families will include uniform, heavy-hitter, and Zipf-like routing distributions. Support for real routing traces is planned.
-
-### 2. Expert-tile scheduler
-
-Each grouped GEMM is decomposed into independently schedulable output tiles. Implemented experimental policies include:
-
-| Policy | Work assignment | Intended regime |
+| Version | Primary change | Work acquisition |
 | --- | --- | --- |
-| Expert order | Original grouped-GEMM order | Baseline |
-| Sorted static persistent | Assign experts or tiles by estimated work | Moderate, predictable skew |
-| Dynamic queue | CTAs acquire the next available expert tile | High routing imbalance |
-| Active-expert compaction | Remove inactive experts before scheduling | Sparse or low-token batches |
-| CLC-assisted scheduling | Explore cluster-level work redistribution | Blackwell-specific experiment |
+| V0 | Non-persistent, double-buffered baseline | One CTA per expert tile |
+| V0.5 | Reuse CTA-local TMEM, SMEM, and barriers | Static grid stride |
+| V1 | Add producer/MMA/writeback warp specialization | Static grid stride |
+| V2 | Acquire one tile at a time from a global queue | Atomic claim-1 |
+| V3 | Amortize queue access with configurable claims | Atomic claim 1/2/4/8 |
+| V4 | Preserve locality for coarse work, balance the tail | Hybrid coarse/fine |
+| V5 | Use Blackwell Cluster Launch Control | Native TIRx CLC scheduler |
+| V6a | Reduce padding with an all-M64 ablation | Static persistent |
+| V6b | Keep M128 main work and move 1-64 row tails to M64 | Two-launch M128/M64 |
 
-Dynamic scheduling is not assumed to be universally faster. Queue traffic, atomics, synchronization, and extra control flow will be measured explicitly.
+V0 and V0.5 already use TMA double buffering, `tcgen05`, and TMEM. The version
+sequence therefore isolates execution and scheduling effects rather than
+comparing a conventional CUDA GEMM with a Tensor Core implementation.
 
-### 3. Workload-aware dispatch
+See [the TIRx kernel guide](docs/tirx_moe_kernel.md) for the pipeline,
+warpgroup responsibilities, worklist invariants, and exact evidence boundary.
 
-The project includes a host-launch bootstrap policy and will fit its crossover
-thresholds from measured data instead of reporting only a best-case speedup.
-The auditable policy has the following form:
+## B200 results
+
+The main comparison uses one NVIDIA B200, BF16 inputs/output, 64 experts,
+4096 routed tokens, `N=7168`, `K=2048`, seed 2026, 20 warmups, and 200 timed
+iterations per case. Positive percentages below mean lower latency.
+
+### Persistent execution and scheduling
+
+| Routing workload | V1 vs V0 median | V2 dynamic vs V1 | V5 CLC vs V1 |
+| --- | ---: | ---: | ---: |
+| Uniform | +6.28% | +0.42% | +0.52% |
+| Heavy-hitter | +7.64% | +0.70% | +0.83% |
+| Sparse | +6.31% | +1.53% | +1.68% |
+| Zipf | +6.54% | +1.26% | +1.40% |
+
+Warp-specialized V1 produced the largest consistent gain. Dynamic claim-1 and
+CLC improved some skewed cases, but only at roughly the 1% level. Larger V3
+claims and the V4 locality hybrid generally regressed, showing that additional
+scheduler complexity was not free.
+
+### Padding-aware M128/M64 policy
+
+| Routing workload | M128/M64 median | M128/M64 p95 | All-M64 median |
+| --- | ---: | ---: | ---: |
+| Uniform | +1.12% | +1.34% | -27.13% |
+| Heavy-hitter | +1.97% | +1.94% | -16.76% |
+| Sparse | -11.24% | -11.25% | -38.42% |
+| Zipf | +0.89% | +1.21% | -12.96% |
+
+The selective M128/M64 path helped heavy-hitter and Zipf, but regressed sparse
+routing. The all-M64 ablation increased useful-work ratio while making every
+workload slower. Reducing padded FLOPs alone was therefore insufficient: tile
+count, launch overhead, pipeline cost, and physical memory traffic determined
+the crossover.
+
+For the Zipf split path, Nsight Compute measured **17.7% less logical TMA-load
+traffic but 5.3% more DRAM reads** than V1. That tension helps explain why a
+large theoretical padding reduction translated into only a 0.9% median gain.
+
+## Optimization trajectory
+
+The experiments produced four main conclusions:
+
+1. **Reuse and pipeline specialization mattered first.** Persistent execution
+   and warp specialization delivered a repeatable 6.3-7.6% improvement over V0.
+2. **More dynamic scheduling was not automatically better.** Claim-1 and CLC
+   offered modest gains; larger claims and hybrid control flow often cost more
+   than the imbalance they recovered.
+3. **The first hypothesis exposed a different bottleneck.** After scheduling
+   gains plateaued, workload metrics showed only 37.6% and 39.0% useful work for
+   M128 heavy-hitter and Zipf cases. This evidence expanded the original search
+   space to tile-size specialization.
+4. **Less padding still did not imply lower latency.** All-M64 was decisively
+   slower, and selective M128/M64 had a workload-dependent crossover. The
+   resulting direction is measured launch-time policy selection, not a
+   universal replacement kernel.
+
+The full hypothesis and evidence log is maintained in
+[the optimization trajectory](docs/optimization_trajectory.md).
+
+## Human-in-the-loop kernel-agent workflow
+
+The project uses Codex as a bounded implementation and analysis partner. It is
+not presented as a standalone autonomous kernel agent.
 
 ```text
-if routing_skew < skew_threshold:
-    use static_persistent
-elif active_tiles < tile_threshold:
-    use compacted_small_m
-else:
-    use dynamic_scheduler
+knowledge + search space + evaluation contract
+                    |
+                    v
+      hypothesize -> implement -> run cheap gates
+                    |
+                    v
+       human-operated B200 benchmark / NCU
+                    |
+                    v
+       analyze -> record -> accept, prune, or revise
 ```
 
-The executable scaffold is in `python/blackwell_moe_tirx/dispatch.py` and can
-be selected with `--kernel=auto`. Its current thresholds are explicitly
-bootstrap values, not performance claims. They will be fitted and validated
-across held-out workload shapes rather than hard-coded from a single benchmark.
+The reusable [optimization skill](skills/optimize-blackwell-moe-kernels/SKILL.md)
+defines the loop. [The search space](agent/search_space.yaml) bounds legal
+transformations, and [the evaluation contract](agent/evaluation_contract.md)
+separates CPU, compile-only, correctness, timing, and profiler evidence.
 
-## Scope
+Deterministic tests—not the language model—decide correctness. The B200 operator
+controls scarce hardware and final promotion. Automating remote job submission,
+NCU ingestion, candidate ranking, and experiment-budget allocation remains
+future work.
 
-| Layer | Responsibility in this project |
-| --- | --- |
-| MoE router / inference engine | Produces expert assignments and token counts; treated as input |
-| Host dispatch | Builds grouped-GEMM metadata and selects a kernel policy |
-| Kernel scheduler | Maps expert tiles to persistent CTAs |
-| Math pipeline | Project-owned TIRx using TMA, tcgen05 and TMEM |
-| Evaluation harness | Generates workloads, checks correctness, profiles kernels, and reports results |
+## Reproduce the experiments
 
-All active project kernels are written in TIRx. CUTLASS is not part of their
-implementation; its pinned source remains under `baselines/cutlass` solely for
-reproducible external comparison. Reused TIRx pipeline structures and compiler
-abstractions are attributed explicitly.
-
-## Evaluation Plan
-
-### Baselines
-
-- a CUTLASS grouped-GEMM baseline;
-- original expert-order scheduling;
-- static persistent scheduling;
-- dynamic and compacted variants developed in this project.
-
-### Workloads
-
-Benchmarks will sweep:
-
-- number of experts;
-- routed tokens per expert;
-- hidden and intermediate dimensions;
-- top-`k` routing patterns;
-- uniform, skewed, sparse, and Zipf-like expert loads;
-- BF16 initially, with FP8 considered after the scheduling study is stable.
-
-### Metrics
-
-- end-to-end kernel latency, including scheduling overhead;
-- median and tail latency across repeated runs;
-- achieved throughput;
-- CTA work imbalance and tail duration;
-- active-expert and tile utilization;
-- queue/atomic overhead for dynamic policies;
-- correctness against a trusted grouped-GEMM reference.
-
-All benchmark reports will record GPU model, clocks or power mode when relevant, CUDA version, CUTLASS revision, build flags, shapes, data type, warm-up procedure, and iteration count.
-
-## Planned Repository Layout
-
-```text
-.
-├── baselines/         # Optional external reference implementations
-├── benchmarks/        # CPU/CUDA legacy benchmark runners
-├── include/           # Scheduler policies and shared kernel interfaces
-├── python/            # Versioned TIRx kernels, planner, CLI, and B200 runner
-├── src/               # CPU model and legacy CUDA probes/references
-├── tests/             # Correctness and scheduler unit tests
-├── tools/             # Trace processing and result analysis
-└── README.md
-```
-
-## Roadmap
-
-- [x] Establish and validate a CUTLASS grouped-GEMM baseline on B200
-- [x] Build the routing-aware workload generator
-- [x] Record expert-level and tile-level imbalance metrics
-- [x] Implement expert-tile decomposition and CPU scheduler simulation
-- [x] Implement V0 non-persistent double-buffered TIRx MoE GEMM
-- [x] Implement V0.5 static-persistent single-warpgroup TIRx MoE GEMM
-- [x] Implement V1 static-persistent warp-specialized TIRx MoE GEMM
-- [x] Implement V2 claim-1 dynamic acquisition with CTA work publication
-- [x] Implement V3 chunked dynamic acquisition
-- [x] Implement V4 coarse-main/fine-tail locality-aware acquisition
-- [x] Implement V5 Blackwell CLC acquisition
-- [ ] Validate V0 through V5 in order on B200
-- [x] Implement and test static persistent GPU tile assignment
-- [x] Implement and test dynamic GPU work distribution with chunked claims
-- [x] Add active-expert compaction to the generated device work list
-- [ ] Measure CLC-assisted work redistribution against atomic queues
-- [ ] Profile scheduler overhead and CTA tail effects
-- [x] Implement host-side routing features and a bootstrap crossover policy
-- [ ] Fit and validate the crossover thresholds from B200 measurements
-- [ ] Publish reproducible Blackwell benchmark results
-
-## Success Criteria
-
-The project will be considered successful when it can:
-
-1. reproduce correctness across the full benchmark matrix;
-2. explain performance using workload and scheduling measurements;
-3. identify crossover regions where static, compacted, or dynamic scheduling is preferable;
-4. demonstrate improvements on representative irregular workloads without hiding regressions;
-5. reproduce reported results from a clean checkout with documented hardware and software versions.
-
-## Agent-Assisted Optimization
-
-Development follows a **human-in-the-loop, agent-assisted kernel optimization
-workflow**. The workload taxonomy, legal transformation space, correctness
-gates, and B200 measurement contract are explicit so Codex can propose and
-implement bounded experiments without turning benchmark results into unsupported
-claims. The human operator remains responsible for trusted B200 execution and
-promotion decisions.
-
-See [`docs/agent_assisted_workflow.md`](docs/agent_assisted_workflow.md), the
-versioned [`agent/search_space.yaml`](agent/search_space.yaml), and the reusable
-[`optimize-blackwell-moe-kernels` skill](skills/optimize-blackwell-moe-kernels/SKILL.md).
-This is not presented as a standalone autonomous kernel agent.
-
-Agent optimization is intentionally sequenced after the project-owned TIRx
-baseline. The current implementation first fixes the math pipeline and proves
-correctness; the later agent experiment will vary only scheduler policy and
-queue claim size under a bounded evaluation contract.
-
-## TIRx Blackwell Path
-
-The versioned implementations live in
-[`python/blackwell_moe_tirx/kernels`](python/blackwell_moe_tirx/kernels). They
-compile routed expert counts into `(expert_id, tile_m, tile_n)` work items and
-use BF16 `128x128x64` and `64x128x64` Blackwell math paths while changing
-execution, acquisition, and padding policy:
-
-- double-buffered TMA operand movement;
-- FP32 `tcgen05` accumulation in Tensor Memory;
-- producer/MMA/writeback warp specialization;
-- TMEM-to-register BF16 epilogue and TMA store;
-- CPU-testable work-list planning and a B200 correctness/median/p95 harness.
-
-The optimization sequence is V0 non-persistent, V0.5 persistent without warp
-specialization, V1 static warp-specialized, V2 dynamic claim-1, V3 chunked,
-V4 locality-aware coarse/fine, V5 CLC, and V6 padding-aware M=128/M=64
-bucketing with tcgen05 Layout F. See
-[`docs/tirx_moe_kernel.md`](docs/tirx_moe_kernel.md) for exact responsibility,
-evidence boundaries, and B200 commands.
-
-## References
-
-Implementation references and exact upstream revisions will be added as dependencies are introduced. Likely foundations include NVIDIA CUTLASS/CuTe documentation, grouped-GEMM examples, and Blackwell architecture programming guidance.
-
-## License
-
-A license will be selected before the first public release.
-
-
-## Getting Started
-
-Phase 1 is dependency-free on the CPU side and requires a C++17 compiler and CMake 3.24 or newer:
+### CPU-side workload and scheduler tests
 
 ```bash
-cmake -S . -B build -DBLACKWELL_MOE_BUILD_TESTS=ON
+cmake -S . -B build \
+  -DBLACKWELL_MOE_ENABLE_CUDA=OFF \
+  -DBLACKWELL_MOE_BUILD_TESTS=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Inspect a workload and its expert-tile imbalance:
+The CPU model reports routing features, tile padding, CTA assignment, and
+exact-once coverage. It does not claim GPU GEMM speedup.
+
+### TIRx environment
 
 ```bash
-./build/moe_workload_bench \
-  --distribution=zipf \
-  --scheduler=static_persistent \
-  --experts=64 \
-  --tokens=4096 \
-  --ctas=120
+python3 -m venv .venv-tirx
+source .venv-tirx/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements-tirx.txt
+export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-This CPU-side model reports tile padding, CTA work imbalance, tail ratio,
-estimated utilization, and expert switches without claiming GPU latency. See
-[`docs/scheduler_model.md`](docs/scheduler_model.md).
-
-Generate a routing workload without third-party Python packages:
+### Full B200 version suite
 
 ```bash
-python3 python/generate_workloads.py \
-  --distribution heavy_hitter \
-  --experts 64 \
-  --tokens 4096 \
-  --output workload.json
+BLACKWELL_MOE_WARMUP=20 \
+BLACKWELL_MOE_ITERATIONS=200 \
+BLACKWELL_MOE_CASE_TIMEOUT=600 \
+bash tools/run_b200_tirx_suite.sh results/b200-tirx-full
 ```
 
-CUDA remains disabled by default so workload tools build without a toolkit.
-The active GPU path is Python/TIRx and does not require the CMake CUDA targets.
-To reproduce the external CUTLASS numbers, explicitly enable both
-`BLACKWELL_MOE_ENABLE_CUDA` and `BLACKWELL_MOE_BUILD_CUTLASS_BASELINE`; see
-[`baselines/cutlass/README.md`](baselines/cutlass/README.md).
+The suite records environment metadata, correctness logs, generated CUDA,
+median/p95 CSV rows, and a compressed result archive.
 
-On B100/B200/GB200, additionally enable
-`BLACKWELL_MOE_ENABLE_SM100_NATIVE` to build the one-SM native TMA/tcgen05/TMEM
-dense kernel, its CPU-reference correctness test, and its small-`M` benchmark.
-See [`docs/sm100_native_dense.md`](docs/sm100_native_dense.md).
+### Focused padding experiment
 
-## Current Implementation
+```bash
+BLACKWELL_MOE_WARMUP=20 \
+BLACKWELL_MOE_ITERATIONS=200 \
+BLACKWELL_MOE_CASE_TIMEOUT=600 \
+bash tools/run_b200_padding_suite.sh results/b200-padding-aware
+```
 
-- [x] CMake project and optional CUDA boundary
-- [x] Deterministic uniform, heavy-hitter, sparse, and Zipf workload generation
-- [x] Routing and expert-tile imbalance metrics
-- [x] Expert-tile decomposition
-- [x] Host reference expert-order and static-persistent assignment
-- [x] CPU persistent-scheduler simulator and CTA assignment metrics
-- [x] Benchmark metadata CLI and unit tests
-- [x] Pinned CUTLASS v4.6.0 external BF16 grouped-GEMM baseline
-- [x] Reusable grouped-GEMM plan with untimed metadata initialization
-- [x] GPU correctness test against an FP32-accumulating CPU reference
-- [x] CUDA Event benchmark with median/p95 latency and environment metadata
-- [x] Explicit SM100a one-SM TMA/warp-specialized dense kernel configuration
-- [x] CUTLASS persistent CLC tile-scheduler reference for the native dense path
-- [x] Native dense correctness test and small-`M` CUDA Event benchmark
-- [x] Direct CuTe TMA barriers, TMEM allocation, tcgen05 MMA, and TMEM-load epilogue
-- [x] Direct CuTe CPU-reference correctness test and benchmark harness
-- [x] Two-SM TMA-multicast/tcgen05 collective reference and benchmark
-- [x] Project-owned device-side expert-tile persistent schedulers
-- [x] Exact-once GPU scheduler correctness and observed CTA-load metrics
-- [x] CPU-tested TIRx MoE work-list planner and active-expert compaction
-- [x] Versioned V0/V0.5/V1 TIRx ablations
-- [x] V2/V3 atomic acquisition with one scheduler and a shared work mailbox
-- [x] V4 coarse expert-major main queue plus claim-1 tail queue
-- [x] V5 native TIRx Cluster Launch Control scheduler
-- [x] V6 Layout-F M=64 tail kernel and padding-aware M=128/M=64 bucketing
-- [x] Unified version-selecting correctness/generated-CUDA/median/p95 harness
+Use [the NCU helper](tools/profile_ncu.sh) for profiler collection. Detailed
+methodology and timing boundaries are documented in
+[benchmark methodology](docs/benchmark_methodology.md).
 
-Run the active V0-V6 TIRx correctness and performance matrix with
-[`tools/run_b200_tirx_suite.sh`](tools/run_b200_tirx_suite.sh). The older CuTe
-reference and scheduler-probe matrix remains available through
-[`tools/run_b200_optimization_suite.sh`](tools/run_b200_optimization_suite.sh)
-and is documented in
-[`docs/b200_optimization_suite.md`](docs/b200_optimization_suite.md).
+## Measurement boundary
+
+- Reported numbers are **kernel-only CUDA Event latency**.
+- Workload generation, allocation, and input initialization are outside timing.
+- Queue initialization is outside timing; in-kernel acquisition is included.
+- Both launches of the V6b M128/M64 path are inside one timed interval.
+- Results do not include routing, token permutation, communication, or complete
+  inference-engine overhead.
+- The current `--kernel=auto` thresholds are bootstrap rules, not a validated
+  production dispatcher. Held-out workload validation remains required.
+
+## Repository map
+
+```text
+agent/       Search-space and evaluation contracts
+baselines/   Optional pinned CUTLASS reference
+benchmarks/  Workload configurations and legacy benchmark entry points
+docs/        Architecture, experiment trajectory, and testing guides
+python/      Versioned TIRx kernels, worklist planner, dispatch, and CLI
+tests/       CPU/reference correctness and scheduler tests
+tools/       B200 benchmark, profiling, and result-packaging scripts
+```
+
+CUTLASS v4.6.0 is retained only as an attributed external correctness and
+performance baseline. All active MoE kernels in the version study are
+project-owned TIRx implementations.
+
+## Current limitations and next steps
+
+- publish a compact, checksummed result bundle with CSV and extracted NCU data;
+- fit dispatch thresholds on training workloads and validate them on held-out
+  shapes and routing traces;
+- include host dispatch and metadata preparation in an end-to-end measurement;
+- automate B200 job submission, profiler ingestion, and experiment-state
+  transitions while retaining human promotion approval.
+
+## References
+
+- [Modern GPU Programming for ML Systems](https://mlc.ai/modern-gpu-programming-for-mlsys/)
+- [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass)
+- [Project architecture](docs/architecture.md)
+- [Agent-assisted workflow](docs/agent_assisted_workflow.md)
