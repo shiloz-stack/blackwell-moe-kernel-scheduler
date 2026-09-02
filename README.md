@@ -5,7 +5,6 @@
 <a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/CUDA-12.8+-76B900.svg?logo=nvidia&amp;logoColor=white" alt="CUDA 12.8+"/></a>
 <a href="requirements-tirx.txt"><img src="https://img.shields.io/badge/TIRx%20%2F%20TVM-0.26-FF6F00.svg" alt="TIRx / TVM 0.26"/></a>
 <a href="#b200-results"><img src="https://img.shields.io/badge/GPU-NVIDIA%20B200-111111.svg?logo=nvidia&amp;logoColor=76B900" alt="GPU: NVIDIA B200"/></a>
-<a href="#measurement-boundary"><img src="https://img.shields.io/badge/B200%20correctness-passed-2EA44F.svg" alt="B200 correctness passed"/></a>
 </div>
 
 A kernel-level study of how **execution policy, expert-tile scheduling, and tile
